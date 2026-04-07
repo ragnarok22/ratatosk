@@ -23,6 +23,9 @@ cmd/server/dashboard/dist/
 .DS_Store
 Thumbs.db
 
+# Build output
+bin/
+
 # Environment
 .env
 .env.*
