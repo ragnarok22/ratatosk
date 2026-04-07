@@ -1,12 +1,16 @@
 package main
 
 import (
+	"io"
 	"log/slog"
 	"net"
 	"os"
+	"sync"
 
 	"ratatosk/internal/tunnel"
 )
+
+const localAddr = "localhost:3000"
 
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
@@ -25,35 +29,49 @@ func main() {
 		os.Exit(1)
 	}
 	defer session.Close()
-	slog.Info("yamux session established")
+	slog.Info("yamux session established, waiting for tunnel requests", "forward", localAddr)
 
-	stream, err := session.Open()
-	if err != nil {
-		slog.Error("failed to open stream", "error", err)
-		os.Exit(1)
+	for {
+		stream, err := session.Accept()
+		if err != nil {
+			if err == io.EOF {
+				slog.Info("session closed by server")
+			} else {
+				slog.Error("session error", "error", err)
+			}
+			return
+		}
+		go handleStream(stream)
 	}
+}
+
+func handleStream(stream net.Conn) {
 	defer stream.Close()
 
-	if _, err := stream.Write([]byte("ping")); err != nil {
-		slog.Error("failed to send ping", "error", err)
-		os.Exit(1)
-	}
-	slog.Info("sent ping")
-
-	buf := make([]byte, 1024)
-	n, err := stream.Read(buf)
+	local, err := net.Dial("tcp", localAddr)
 	if err != nil {
-		slog.Error("failed to read response", "error", err)
-		os.Exit(1)
+		slog.Error("failed to connect to local server", "addr", localAddr, "error", err)
+		return
 	}
+	defer local.Close()
 
-	response := string(buf[:n])
-	slog.Info("received response", "message", response)
+	slog.Info("forwarding request", "addr", localAddr)
 
-	if response == "pong" {
-		slog.Info("ping/pong successful — tunnel multiplexing is working")
-	} else {
-		slog.Error("unexpected response", "expected", "pong", "got", response)
-		os.Exit(1)
-	}
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	// Forward HTTP request from tunnel to local server.
+	go func() {
+		defer wg.Done()
+		io.Copy(local, stream)
+	}()
+
+	// Forward HTTP response from local server back through tunnel.
+	go func() {
+		defer wg.Done()
+		io.Copy(stream, local)
+	}()
+
+	wg.Wait()
+	slog.Info("request completed")
 }
