@@ -1,18 +1,23 @@
 package main
 
 import (
+	"flag"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"os"
 	"sync"
 
+	"ratatosk/internal/protocol"
 	"ratatosk/internal/tunnel"
 )
 
-const localAddr = "localhost:3000"
-
 func main() {
+	port := flag.Int("port", 3000, "local port to expose")
+	flag.Parse()
+	localAddr := fmt.Sprintf("localhost:%d", *port)
+
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
 
 	conn, err := net.Dial("tcp", "localhost:7000")
@@ -29,7 +34,37 @@ func main() {
 		os.Exit(1)
 	}
 	defer session.Close()
-	slog.Info("yamux session established, waiting for tunnel requests", "forward", localAddr)
+
+	// Open a control stream and perform the handshake.
+	controlStream, err := session.Open()
+	if err != nil {
+		slog.Error("failed to open control stream", "error", err)
+		os.Exit(1)
+	}
+
+	req := &protocol.TunnelRequest{Protocol: "http", LocalPort: *port}
+	if err := protocol.WriteRequest(controlStream, req); err != nil {
+		slog.Error("failed to send tunnel request", "error", err)
+		os.Exit(1)
+	}
+
+	resp, err := protocol.ReadResponse(controlStream)
+	if err != nil {
+		slog.Error("failed to read tunnel response", "error", err)
+		os.Exit(1)
+	}
+	controlStream.Close()
+
+	if !resp.Success {
+		slog.Error("tunnel creation failed", "error", resp.Error)
+		os.Exit(1)
+	}
+
+	fmt.Println()
+	fmt.Println("Ratatosk                        (Ctrl+C to quit)")
+	fmt.Println()
+	fmt.Printf("Forwarding  http://%s.localhost:8080 -> http://localhost:%d\n", resp.Subdomain, *port)
+	fmt.Println()
 
 	for {
 		stream, err := session.Accept()
@@ -41,11 +76,11 @@ func main() {
 			}
 			return
 		}
-		go handleStream(stream)
+		go handleStream(stream, localAddr)
 	}
 }
 
-func handleStream(stream net.Conn) {
+func handleStream(stream net.Conn, localAddr string) {
 	defer stream.Close()
 
 	local, err := net.Dial("tcp", localAddr)

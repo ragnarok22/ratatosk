@@ -97,6 +97,25 @@ func TestRegisterOverwrite(t *testing.T) {
 	}
 }
 
+func TestHasSubdomain(t *testing.T) {
+	r := NewRegistry()
+	_, session := newTestSession(t)
+
+	if r.HasSubdomain("abc123") {
+		t.Fatal("HasSubdomain returned true before registration")
+	}
+
+	r.Register("abc123", session)
+	if !r.HasSubdomain("abc123") {
+		t.Fatal("HasSubdomain returned false after registration")
+	}
+
+	r.Unregister("abc123")
+	if r.HasSubdomain("abc123") {
+		t.Fatal("HasSubdomain returned true after unregistration")
+	}
+}
+
 func TestConcurrentAccess(t *testing.T) {
 	r := NewRegistry()
 

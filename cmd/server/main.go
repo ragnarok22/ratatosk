@@ -1,8 +1,6 @@
 package main
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"io"
 	"log/slog"
 	"net"
@@ -11,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"ratatosk/internal/protocol"
 	"ratatosk/internal/tunnel"
 )
 
@@ -46,14 +45,6 @@ func main() {
 	}
 }
 
-func generateSubdomain() (string, error) {
-	b := make([]byte, 3)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
-}
-
 func handleConnection(conn net.Conn) {
 	remote := conn.RemoteAddr().String()
 	slog.Info("new TCP connection", "remote", remote)
@@ -66,13 +57,48 @@ func handleConnection(conn net.Conn) {
 	}
 	defer session.Close()
 
-	subdomain, err := generateSubdomain()
+	// Accept the control stream opened by the client for the handshake.
+	controlStream, err := session.Accept()
 	if err != nil {
-		slog.Error("failed to generate subdomain", "error", err)
+		slog.Error("failed to accept control stream", "remote", remote, "error", err)
+		return
+	}
+
+	req, err := protocol.ReadRequest(controlStream)
+	if err != nil {
+		slog.Error("failed to read tunnel request", "remote", remote, "error", err)
+		controlStream.Close()
+		return
+	}
+	slog.Info("received tunnel request", "remote", remote, "protocol", req.Protocol, "local_port", req.LocalPort)
+
+	// Generate a human-readable subdomain with collision check.
+	var subdomain string
+	for range 10 {
+		candidate := protocol.GenerateSubdomain()
+		if !registry.HasSubdomain(candidate) {
+			subdomain = candidate
+			break
+		}
+	}
+	if subdomain == "" {
+		resp := &protocol.TunnelResponse{Success: false, Error: "failed to generate unique subdomain"}
+		protocol.WriteResponse(controlStream, resp)
+		controlStream.Close()
 		return
 	}
 
 	registry.Register(subdomain, session)
+
+	resp := &protocol.TunnelResponse{Subdomain: subdomain, Success: true}
+	if err := protocol.WriteResponse(controlStream, resp); err != nil {
+		slog.Error("failed to send tunnel response", "remote", remote, "error", err)
+		registry.Unregister(subdomain)
+		controlStream.Close()
+		return
+	}
+	controlStream.Close()
+
 	slog.Info("tunnel registered",
 		"subdomain", subdomain,
 		"url", "http://"+subdomain+".localhost:8080",

@@ -40,3 +40,11 @@ func (r *Registry) GetSession(subdomain string) (*yamux.Session, bool) {
 	r.mu.RUnlock()
 	return session, ok
 }
+
+// HasSubdomain reports whether a subdomain is already registered.
+func (r *Registry) HasSubdomain(subdomain string) bool {
+	r.mu.RLock()
+	_, ok := r.sessions[subdomain]
+	r.mu.RUnlock()
+	return ok
+}

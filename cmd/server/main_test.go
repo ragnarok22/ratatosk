@@ -1,32 +1,74 @@
 package main
 
 import (
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
+
+	"ratatosk/internal/protocol"
+	"ratatosk/internal/tunnel"
 )
 
-func TestGenerateSubdomain(t *testing.T) {
-	sub, err := generateSubdomain()
-	if err != nil {
-		t.Fatalf("generateSubdomain: %v", err)
-	}
-	if len(sub) != 6 {
-		t.Errorf("subdomain length = %d, want 6 (hex of 3 bytes)", len(sub))
-	}
-}
+func TestHandleConnectionHandshake(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		clientConn.Close()
+		serverConn.Close()
+	})
 
-func TestGenerateSubdomainUniqueness(t *testing.T) {
-	seen := make(map[string]bool)
-	for range 100 {
-		sub, err := generateSubdomain()
-		if err != nil {
-			t.Fatalf("generateSubdomain: %v", err)
-		}
-		if seen[sub] {
-			t.Fatalf("duplicate subdomain: %s", sub)
-		}
-		seen[sub] = true
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleConnection(serverConn)
+	}()
+
+	// Client side: create yamux session and perform handshake.
+	clientSession, err := tunnel.NewClientSession(clientConn)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+
+	controlStream, err := clientSession.Open()
+	if err != nil {
+		t.Fatalf("Open control stream: %v", err)
+	}
+
+	req := &protocol.TunnelRequest{Protocol: "http", LocalPort: 3000}
+	if err := protocol.WriteRequest(controlStream, req); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+
+	resp, err := protocol.ReadResponse(controlStream)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	controlStream.Close()
+
+	if !resp.Success {
+		t.Fatalf("handshake failed: %s", resp.Error)
+	}
+	if resp.Subdomain == "" {
+		t.Fatal("empty subdomain in response")
+	}
+
+	// Verify the subdomain was registered.
+	if !registry.HasSubdomain(resp.Subdomain) {
+		t.Fatalf("subdomain %q not found in registry", resp.Subdomain)
+	}
+
+	// Close the client session and wait for the server to unregister.
+	clientSession.Close()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleConnection did not return after client disconnect")
+	}
+
+	if registry.HasSubdomain(resp.Subdomain) {
+		t.Fatalf("subdomain %q still in registry after disconnect", resp.Subdomain)
 	}
 }
 
