@@ -1,4 +1,4 @@
-.PHONY: dev-server dev-cli dev-dashboard build clean format lint
+.PHONY: dev-server dev-cli dev-dashboard build clean format lint test test-race coverage
 
 dev-server:
 	go run ./cmd/server
@@ -19,5 +19,15 @@ format:
 lint:
 	go vet ./...
 
+test:
+	go test ./...
+
+test-race:
+	go test -race ./...
+
+coverage:
+	go test -coverprofile=coverage.out ./...
+	go tool cover -func=coverage.out
+
 clean:
-	rm -rf bin/
+	rm -rf bin/ coverage.out
