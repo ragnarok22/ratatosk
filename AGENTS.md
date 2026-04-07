@@ -47,6 +47,24 @@ State Management (V1): In-memory data structures (maps and structs) protected by
 
 Multiplexing: The core magic relies on taking a single TCP control channel and multiplexing it to handle multiple concurrent HTTP requests without opening new ports on the local router.
 
+## Testing
+
+Tests live alongside the code they cover using Go's standard `_test.go` convention:
+
+- `internal/tunnel/registry_test.go` — Registry CRUD and concurrent access.
+- `internal/tunnel/multiplexer_test.go` — yamux config, session creation, end-to-end bidirectional streaming.
+- `cmd/server/main_test.go` — subdomain generation and HTTP handler edge cases.
+
+Run tests with Make:
+
+```sh
+make test          # go test ./...
+make test-race     # go test -race ./...
+make coverage      # generate coverage report
+```
+
+When adding new packages under `internal/` or `cmd/`, always include a `*_test.go` file with at least basic unit tests. Use `net.Pipe()` to create in-memory connections for yamux session tests. Run `make test-race` before submitting changes to catch concurrency issues.
+
 ## Directives
 Concurrency Safety: Since Go handles connections via goroutines, always check for race conditions. Use channels or sync.Mutex meticulously when accessing the shared tunnel state manager.
 

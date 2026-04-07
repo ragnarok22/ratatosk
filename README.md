@@ -59,6 +59,14 @@ The client connects to `localhost:7000`, establishes a yamux session, and verifi
 make dev-dashboard
 ```
 
+## Testing
+
+```sh
+make test          # run all tests
+make test-race     # run with the race detector
+make coverage      # generate and display coverage report
+```
+
 ## Build
 
 Compile both binaries into `bin/`:
