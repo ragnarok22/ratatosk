@@ -1054,6 +1054,8 @@ func TestRunRawClientHandshakeFailure(t *testing.T) {
 			Error:   "port exhausted",
 		})
 		cs.Close()
+
+		time.Sleep(100 * time.Millisecond)
 	})
 
 	err := runRawClient(addr, 22, protocol.ProtoTCP)
