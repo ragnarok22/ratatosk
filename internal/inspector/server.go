@@ -123,6 +123,17 @@ function fmtHeaders(h) {
 function escapeHtml(s) {
   const d = document.createElement('div'); d.textContent = s || ''; return d.innerHTML;
 }
+function fmtRespBody(l) {
+  if (!l.resp_body) return '<pre>(empty)</pre>';
+  if (l.resp_body_binary) {
+    const ct = (l.resp_headers && l.resp_headers['Content-Type']) || '';
+    if (ct.startsWith('image/')) {
+      return '<img src="data:'+escapeHtml(ct)+';base64,'+l.resp_body+'" style="max-width:100%;border-radius:6px;margin-top:4px">';
+    }
+    return '<pre>(binary ' + l.resp_body.length + ' bytes base64)</pre>';
+  }
+  return '<pre>'+escapeHtml(l.resp_body)+'</pre>';
+}
 
 const tbody = document.getElementById('tbody');
 const table = document.getElementById('table');
@@ -157,7 +168,7 @@ function render(logs) {
       '<div><h3>Request Headers</h3><pre>'+escapeHtml(fmtHeaders(l.req_headers))+'</pre></div>'+
       '<div><h3>Response Headers</h3><pre>'+escapeHtml(fmtHeaders(l.resp_headers))+'</pre></div>'+
       '<div><h3>Request Body</h3><pre>'+escapeHtml(l.req_body || '(empty)')+'</pre></div>'+
-      '<div><h3>Response Body</h3><pre>'+escapeHtml(l.resp_body || '(empty)')+'</pre></div>'+
+      '<div><h3>Response Body</h3>'+fmtRespBody(l)+'</div>'+
       '</div></td>';
     tbody.appendChild(detail);
   }

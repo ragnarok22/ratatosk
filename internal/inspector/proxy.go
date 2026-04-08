@@ -3,6 +3,7 @@ package inspector
 import (
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"io"
 	"log/slog"
 	"net"
@@ -64,16 +65,27 @@ func HandleStream(stream net.Conn, localAddr string, logger *Logger) {
 
 	duration := time.Since(start)
 
+	ct := resp.Header.Get("Content-Type")
+	binary := isBinaryContentType(ct)
+
+	var loggedRespBody string
+	if binary {
+		loggedRespBody = base64.StdEncoding.EncodeToString(respBody)
+	} else {
+		loggedRespBody = TruncateBody(respBody)
+	}
+
 	logger.Add(TrafficLog{
-		Method:      req.Method,
-		Path:        req.URL.Path,
-		ReqHeaders:  flattenHeaders(req.Header),
-		ReqBody:     TruncateBody(reqBody),
-		RespStatus:  resp.StatusCode,
-		RespHeaders: flattenHeaders(resp.Header),
-		RespBody:    TruncateBody(respBody),
-		Duration:    duration,
-		Timestamp:   start,
+		Method:         req.Method,
+		Path:           req.URL.Path,
+		ReqHeaders:     flattenHeaders(req.Header),
+		ReqBody:        TruncateBody(reqBody),
+		RespStatus:     resp.StatusCode,
+		RespHeaders:    flattenHeaders(resp.Header),
+		RespBody:       loggedRespBody,
+		RespBodyBinary: binary,
+		Duration:       duration,
+		Timestamp:      start,
 	})
 
 	slog.Info("request completed",
@@ -87,6 +99,14 @@ func HandleStream(stream net.Conn, localAddr string, logger *Logger) {
 	resp.Body = io.NopCloser(bytes.NewReader(respBody))
 	resp.ContentLength = int64(len(respBody))
 	resp.Write(stream)
+}
+
+func isBinaryContentType(ct string) bool {
+	ct = strings.ToLower(ct)
+	return strings.HasPrefix(ct, "image/") ||
+		strings.HasPrefix(ct, "audio/") ||
+		strings.HasPrefix(ct, "video/") ||
+		strings.HasPrefix(ct, "application/octet-stream")
 }
 
 func flattenHeaders(h http.Header) map[string]string {

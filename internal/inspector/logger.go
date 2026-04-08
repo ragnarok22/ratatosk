@@ -12,16 +12,17 @@ const (
 
 // TrafficLog represents a captured HTTP request/response pair.
 type TrafficLog struct {
-	ID          int               `json:"id"`
-	Method      string            `json:"method"`
-	Path        string            `json:"path"`
-	ReqHeaders  map[string]string `json:"req_headers"`
-	ReqBody     string            `json:"req_body"`
-	RespStatus  int               `json:"resp_status"`
-	RespHeaders map[string]string `json:"resp_headers"`
-	RespBody    string            `json:"resp_body"`
-	Duration    time.Duration     `json:"duration"`
-	Timestamp   time.Time         `json:"timestamp"`
+	ID             int               `json:"id"`
+	Method         string            `json:"method"`
+	Path           string            `json:"path"`
+	ReqHeaders     map[string]string `json:"req_headers"`
+	ReqBody        string            `json:"req_body"`
+	RespStatus     int               `json:"resp_status"`
+	RespHeaders    map[string]string `json:"resp_headers"`
+	RespBody       string            `json:"resp_body"`
+	RespBodyBinary bool              `json:"resp_body_binary,omitempty"`
+	Duration       time.Duration     `json:"duration"`
+	Timestamp      time.Time         `json:"timestamp"`
 }
 
 // Logger is a thread-safe ring buffer of TrafficLog entries.
