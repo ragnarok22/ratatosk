@@ -1304,7 +1304,7 @@ func TestHandleConnectionBadProtocol(t *testing.T) {
 	}
 }
 
-func TestProxyRequestSessionClosed(t *testing.T) {
+func TestHTTPProxySessionClosed(t *testing.T) {
 	clientPipe, serverPipe := net.Pipe()
 	serverSession, err := tunnel.NewServerSession(serverPipe)
 	if err != nil {
@@ -1320,17 +1320,21 @@ func TestProxyRequestSessionClosed(t *testing.T) {
 	clientPipe.Close()
 	serverPipe.Close()
 
-	req := httptest.NewRequest("GET", "http://example.com/", nil)
-	dummyConn, dummyBack := net.Pipe()
-	defer dummyConn.Close()
-	defer dummyBack.Close()
+	registry.Register("closed", serverSession, "", protocol.ProtoHTTP)
+	t.Cleanup(func() { registry.Unregister("closed") })
 
-	if proxyRequest(req, "closed", serverSession, dummyConn) {
-		t.Error("expected proxyRequest to return false when session is closed")
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Host = "closed.localhost:8080"
+
+	handleHTTP(w, req)
+
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", w.Code)
 	}
 }
 
-func TestProxyRequestWriteError(t *testing.T) {
+func TestHTTPProxyWriteError(t *testing.T) {
 	clientPipe, serverPipe := net.Pipe()
 	serverSession, err := tunnel.NewServerSession(serverPipe)
 	if err != nil {
@@ -1356,18 +1360,21 @@ func TestProxyRequestWriteError(t *testing.T) {
 		io.Copy(io.Discard, stream)
 	}()
 
-	req, err := http.NewRequest(http.MethodPost, "http://example.com/upload", failingReadCloser{})
+	registry.Register("broken", serverSession, "", protocol.ProtoHTTP)
+	t.Cleanup(func() { registry.Unregister("broken") })
+
+	w := httptest.NewRecorder()
+	req, err := http.NewRequest(http.MethodPost, "http://broken.localhost:8080/upload", failingReadCloser{})
 	if err != nil {
 		t.Fatalf("NewRequest: %v", err)
 	}
+	req.Host = "broken.localhost:8080"
 	req.ContentLength = 1
 
-	dummyConn, dummyPeer := net.Pipe()
-	defer dummyConn.Close()
-	defer dummyPeer.Close()
+	handleHTTP(w, req)
 
-	if proxyRequest(req, "broken", serverSession, dummyConn) {
-		t.Fatal("expected proxyRequest to return false when request write fails")
+	if w.Code != http.StatusBadGateway {
+		t.Errorf("status = %d, want 502", w.Code)
 	}
 }
 
@@ -1632,34 +1639,6 @@ func TestHTTPProxyKeepAliveInvalidHost(t *testing.T) {
 	}
 }
 
-func TestHandleHTTPNoHijackSupport(t *testing.T) {
-	clientPipe, serverPipe := net.Pipe()
-	t.Cleanup(func() { clientPipe.Close(); serverPipe.Close() })
-
-	serverSession, err := tunnel.NewServerSession(serverPipe)
-	if err != nil {
-		t.Fatalf("NewServerSession: %v", err)
-	}
-	registry.Register("nohijack", serverSession, "", protocol.ProtoHTTP)
-	t.Cleanup(func() { registry.Unregister("nohijack") })
-
-	clientSession, err := tunnel.NewClientSession(clientPipe)
-	if err != nil {
-		t.Fatalf("NewClientSession: %v", err)
-	}
-	t.Cleanup(func() { clientSession.Close() })
-
-	w := httptest.NewRecorder()
-	req := httptest.NewRequest("GET", "/", nil)
-	req.Host = "nohijack.localhost:8080"
-
-	handleHTTP(w, req)
-
-	if w.Code != http.StatusInternalServerError {
-		t.Errorf("status = %d, want 500", w.Code)
-	}
-}
-
 func TestCheckBasicAuthNoAuthRequired(t *testing.T) {
 	w := httptest.NewRecorder()
 	r := httptest.NewRequest("GET", "/", nil)
@@ -1706,42 +1685,6 @@ func TestCheckBasicAuthMissing(t *testing.T) {
 	}
 }
 
-func TestWriteRaw401(t *testing.T) {
-	clientConn, serverConn := net.Pipe()
-	t.Cleanup(func() {
-		clientConn.Close()
-		serverConn.Close()
-	})
-
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		writeRaw401(serverConn)
-	}()
-
-	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
-	if err != nil {
-		t.Fatalf("ReadResponse: %v", err)
-	}
-	body, err := io.ReadAll(resp.Body)
-	resp.Body.Close()
-	if err != nil {
-		t.Fatalf("ReadAll: %v", err)
-	}
-
-	if resp.StatusCode != http.StatusUnauthorized {
-		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
-	}
-	if got := resp.Header.Get("WWW-Authenticate"); got != `Basic realm="Ratatosk Tunnel"` {
-		t.Fatalf("WWW-Authenticate = %q, want %q", got, `Basic realm="Ratatosk Tunnel"`)
-	}
-	if string(body) != "Unauthorized" {
-		t.Fatalf("body = %q, want %q", body, "Unauthorized")
-	}
-
-	<-done
-}
-
 func TestHTTPProxyKeepAliveBasicAuthRejected(t *testing.T) {
 	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "ok")
@@ -1782,8 +1725,8 @@ func TestHTTPProxyKeepAliveBasicAuthRejected(t *testing.T) {
 	if resp2.StatusCode != http.StatusUnauthorized {
 		t.Fatalf("request 2: status = %d, want %d", resp2.StatusCode, http.StatusUnauthorized)
 	}
-	if string(body) != "Unauthorized" {
-		t.Fatalf("request 2: body = %q, want %q", body, "Unauthorized")
+	if got := strings.TrimSpace(string(body)); got != "Unauthorized" {
+		t.Fatalf("request 2: body = %q, want %q", got, "Unauthorized")
 	}
 }
 
