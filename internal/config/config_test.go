@@ -109,6 +109,43 @@ tls_key_file: /etc/ssl/key.pem
 	}
 }
 
+func TestLoadConfigFromHomeDirPath(t *testing.T) {
+	homeDir := t.TempDir()
+	configDir := filepath.Join(homeDir, ".ratatosk")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	content := []byte(`base_domain: from-home-dir.dev
+public_port: 9191
+`)
+	if err := os.WriteFile(filepath.Join(configDir, "ratatosk.yaml"), content, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	// Ensure LoadConfig resolves $HOME to the real directory, and does not
+	// accidentally find a config file from the current working directory.
+	t.Setenv("HOME", homeDir)
+	cwd := t.TempDir()
+	orig, _ := os.Getwd()
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	if cfg.BaseDomain != "from-home-dir.dev" {
+		t.Errorf("BaseDomain = %q, want %q", cfg.BaseDomain, "from-home-dir.dev")
+	}
+	if cfg.PublicPort != 9191 {
+		t.Errorf("PublicPort = %d, want %d", cfg.PublicPort, 9191)
+	}
+}
+
 func TestLoadConfigInvalidFile(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "ratatosk.yaml"), []byte("{{invalid yaml"), 0644); err != nil {

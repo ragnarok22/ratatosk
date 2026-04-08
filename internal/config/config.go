@@ -3,6 +3,8 @@ package config
 import (
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -68,7 +70,9 @@ func LoadConfig() (*ServerConfig, error) {
 	v.SetConfigName("ratatosk")
 	v.SetConfigType("yaml")
 	v.AddConfigPath("/etc/ratatosk/")
-	v.AddConfigPath("$HOME/.ratatosk/")
+	if homeDir, err := os.UserHomeDir(); err == nil && homeDir != "" {
+		v.AddConfigPath(filepath.Join(homeDir, ".ratatosk"))
+	}
 	v.AddConfigPath(".")
 
 	// Environment variables.
