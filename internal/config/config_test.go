@@ -1,8 +1,10 @@
 package config
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -129,6 +131,61 @@ tls_key_file: /etc/ssl/key.pem
 	}
 	if cfg.TLSKeyFile != "/etc/ssl/key.pem" {
 		t.Errorf("TLSKeyFile = %q, want %q", cfg.TLSKeyFile, "/etc/ssl/key.pem")
+	}
+}
+
+func TestLoadConfigFromHomeConfigDir(t *testing.T) {
+	homeDir := t.TempDir()
+	configDir := filepath.Join(homeDir, ".ratatosk")
+	if err := os.MkdirAll(configDir, 0755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	content := []byte(`base_domain: home.example
+public_port: 18080
+`)
+	if err := os.WriteFile(filepath.Join(configDir, "ratatosk.yaml"), content, 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	t.Setenv("HOME", homeDir)
+
+	// Ensure current directory does not contain a ratatosk.yaml file.
+	cwd := t.TempDir()
+	orig, _ := os.Getwd()
+	if err := os.Chdir(cwd); err != nil {
+		t.Fatalf("Chdir: %v", err)
+	}
+	t.Cleanup(func() { os.Chdir(orig) })
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	if cfg.BaseDomain != "home.example" {
+		t.Errorf("BaseDomain = %q, want %q", cfg.BaseDomain, "home.example")
+	}
+	if cfg.PublicPort != 18080 {
+		t.Errorf("PublicPort = %d, want %d", cfg.PublicPort, 18080)
+	}
+}
+
+func TestLoadConfigMissingHomeDir(t *testing.T) {
+	orig := osUserHomeDir
+	osUserHomeDir = func() (string, error) {
+		return "", errors.New("home unavailable")
+	}
+	t.Cleanup(func() {
+		osUserHomeDir = orig
+	})
+
+	_, err := LoadConfig()
+	if err == nil {
+		t.Fatal("expected error when home directory cannot be resolved")
+	}
+	if !strings.Contains(err.Error(), "resolving home directory") {
+		t.Fatalf("error = %q, want context about resolving home directory", err.Error())
 	}
 }
 
