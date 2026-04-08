@@ -11,6 +11,9 @@ const MaxUDPFrameSize = 65535
 
 // WriteFrame writes a length-prefixed frame: [4-byte big-endian length][payload].
 func WriteFrame(w io.Writer, data []byte) error {
+	if len(data) > MaxUDPFrameSize {
+		return fmt.Errorf("frame too large: %d bytes (max %d)", len(data), MaxUDPFrameSize)
+	}
 	var header [4]byte
 	binary.BigEndian.PutUint32(header[:], uint32(len(data)))
 	if _, err := w.Write(header[:]); err != nil {
