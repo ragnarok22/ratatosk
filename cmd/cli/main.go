@@ -19,9 +19,23 @@ import (
 
 var Version = "dev"
 
+var (
+	cliArgs            = func() []string { return os.Args }
+	cliGetenv          = os.Getenv
+	cliStdout io.Writer = os.Stdout
+	cliStderr io.Writer = os.Stderr
+	cliExit            = os.Exit
+	cliUpdateCLI       = updater.UpdateCLI
+	cliRunClient       = runClient
+	cliRunRawClient    = runRawClient
+	cliStartInspector  = inspector.StartServer
+	cliResolveUDPAddr  = net.ResolveUDPAddr
+	cliDialUDP         = net.DialUDP
+)
+
 func main() {
-	if code := run(os.Args, os.Getenv, os.Stdout, os.Stderr, updater.UpdateCLI, runClient, runRawClient); code != 0 {
-		os.Exit(code)
+	if code := run(cliArgs(), cliGetenv, cliStdout, cliStderr, cliUpdateCLI, cliRunClient, cliRunRawClient); code != 0 {
+		cliExit(code)
 	}
 }
 
@@ -200,7 +214,7 @@ func runClient(serverAddr string, localPort int, basicAuth string) error {
 	}
 
 	logger := inspector.NewLogger()
-	inspectorAddr, inspectorErr := inspector.StartServer(logger)
+	inspectorAddr, inspectorErr := cliStartInspector(logger)
 
 	tunnelURL := resp.URL
 	if tunnelURL == "" {
@@ -329,12 +343,12 @@ func handleTCPStream(stream net.Conn, localAddr string) {
 func handleUDPStream(stream net.Conn, localAddr string) {
 	defer stream.Close()
 
-	udpAddr, err := net.ResolveUDPAddr("udp", localAddr)
+	udpAddr, err := cliResolveUDPAddr("udp", localAddr)
 	if err != nil {
 		slog.Error("failed to resolve UDP address", "addr", localAddr, "error", err)
 		return
 	}
-	local, err := net.DialUDP("udp", nil, udpAddr)
+	local, err := cliDialUDP("udp", nil, udpAddr)
 	if err != nil {
 		slog.Error("failed to connect to local UDP service", "addr", localAddr, "error", err)
 		return

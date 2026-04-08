@@ -31,6 +31,13 @@ var (
 	mainListen                      = net.Listen
 	mainListenAndServe              = http.ListenAndServe
 	mainListenAndServeTLS           = http.ListenAndServeTLS
+	serverStartControlPlane         = startControlPlane
+	serverStartAdminServer          = startAdminServer
+	serverStartPublicServer         = startPublicServer
+	serverGenerateSubdomain         = protocol.GenerateSubdomain
+	serverListenTCP                 = net.Listen
+	serverResolveUDPAddr            = net.ResolveUDPAddr
+	serverListenUDP                 = net.ListenUDP
 )
 
 func main() {
@@ -57,13 +64,13 @@ func runMain(
 
 	stop := make(chan struct{})
 
-	if err := startControlPlane(stop, listen); err != nil {
+	if err := serverStartControlPlane(stop, listen); err != nil {
 		slog.Error("failed to start TCP listener", "error", err)
 		return 1
 	}
 
-	adminErrs := startAdminServer(stop, serve)
-	publicErrs := startPublicServer(stop, serve, serveTLS)
+	adminErrs := serverStartAdminServer(stop, serve)
+	publicErrs := serverStartPublicServer(stop, serve, serveTLS)
 
 	select {
 	case err := <-adminErrs:
@@ -252,7 +259,7 @@ func handleHTTPTunnel(session *yamux.Session, controlStream net.Conn, req *proto
 	// Generate a human-readable subdomain with collision check.
 	var subdomain string
 	for range 10 {
-		candidate := protocol.GenerateSubdomain()
+		candidate := serverGenerateSubdomain()
 		if !registry.HasSubdomain(candidate) {
 			subdomain = candidate
 			break
@@ -310,7 +317,7 @@ func handleTCPTunnel(session *yamux.Session, controlStream net.Conn, req *protoc
 		return
 	}
 
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	ln, err := serverListenTCP("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		portAlloc.Release(port)
 		resp := &protocol.TunnelResponse{Success: false, Error: fmt.Sprintf("failed to listen on port %d: %v", port, err)}
@@ -332,6 +339,7 @@ func handleTCPTunnel(session *yamux.Session, controlStream net.Conn, req *protoc
 	resp := &protocol.TunnelResponse{Port: port, Success: true}
 	if err := protocol.WriteResponse(controlStream, resp); err != nil {
 		slog.Error("failed to send tunnel response", "remote", remote, "error", err)
+		ln.Close()
 		registry.UnregisterPort(port)
 		portAlloc.Release(port)
 		controlStream.Close()
@@ -376,7 +384,7 @@ func handleUDPTunnel(session *yamux.Session, controlStream net.Conn, req *protoc
 		return
 	}
 
-	udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", port))
+	udpAddr, err := serverResolveUDPAddr("udp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		portAlloc.Release(port)
 		resp := &protocol.TunnelResponse{Success: false, Error: fmt.Sprintf("failed to resolve UDP address: %v", err)}
@@ -385,7 +393,7 @@ func handleUDPTunnel(session *yamux.Session, controlStream net.Conn, req *protoc
 		return
 	}
 
-	udpConn, err := net.ListenUDP("udp", udpAddr)
+	udpConn, err := serverListenUDP("udp", udpAddr)
 	if err != nil {
 		portAlloc.Release(port)
 		resp := &protocol.TunnelResponse{Success: false, Error: fmt.Sprintf("failed to listen on UDP port %d: %v", port, err)}
@@ -407,6 +415,7 @@ func handleUDPTunnel(session *yamux.Session, controlStream net.Conn, req *protoc
 	resp := &protocol.TunnelResponse{Port: port, Success: true}
 	if err := protocol.WriteResponse(controlStream, resp); err != nil {
 		slog.Error("failed to send tunnel response", "remote", remote, "error", err)
+		udpConn.Close()
 		registry.UnregisterPort(port)
 		portAlloc.Release(port)
 		controlStream.Close()
