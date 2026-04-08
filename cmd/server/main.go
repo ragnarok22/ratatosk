@@ -25,19 +25,19 @@ var (
 	cfg       *config.ServerConfig
 	portAlloc *tunnel.PortAllocator
 
-	mainStdout            io.Writer = os.Stdout
-	mainExit                        = os.Exit
-	mainLoadConfig                  = config.LoadConfig
-	mainListen                      = net.Listen
-	mainListenAndServe              = http.ListenAndServe
-	mainListenAndServeTLS           = http.ListenAndServeTLS
-	serverStartControlPlane         = startControlPlane
-	serverStartAdminServer          = startAdminServer
-	serverStartPublicServer         = startPublicServer
-	serverGenerateSubdomain         = protocol.GenerateSubdomain
-	serverListenTCP                 = net.Listen
-	serverResolveUDPAddr            = net.ResolveUDPAddr
-	serverListenUDP                 = net.ListenUDP
+	mainStdout              io.Writer = os.Stdout
+	mainExit                          = os.Exit
+	mainLoadConfig                    = config.LoadConfig
+	mainListen                        = net.Listen
+	mainListenAndServe                = http.ListenAndServe
+	mainListenAndServeTLS             = http.ListenAndServeTLS
+	serverStartControlPlane           = startControlPlane
+	serverStartAdminServer            = startAdminServer
+	serverStartPublicServer           = startPublicServer
+	serverGenerateSubdomain           = protocol.GenerateSubdomain
+	serverListenTCP                   = net.Listen
+	serverResolveUDPAddr              = net.ResolveUDPAddr
+	serverListenUDP                   = net.ListenUDP
 )
 
 func main() {
@@ -214,6 +214,37 @@ func startPublicServer(
 	return errs
 }
 
+// sendErrorAndClose writes a failure TunnelResponse and closes the stream.
+func sendErrorAndClose(stream net.Conn, errMsg string) {
+	resp := &protocol.TunnelResponse{Success: false, Error: errMsg}
+	protocol.WriteResponse(stream, resp)
+	stream.Close()
+}
+
+// awaitSessionEnd blocks until the yamux session ends (client disconnects).
+// It accepts and immediately closes any stray streams.
+func awaitSessionEnd(session *yamux.Session, logKey string, logVal string) {
+	for {
+		stream, err := session.Accept()
+		if err != nil {
+			if err == io.EOF {
+				slog.Info("client disconnected", logKey, logVal)
+			} else {
+				slog.Warn("session error", logKey, logVal, "error", err)
+			}
+			break
+		}
+		stream.Close()
+	}
+}
+
+// cleanupPort unregisters a port from the registry and releases it back to the allocator.
+func cleanupPort(port int, proto string) {
+	registry.UnregisterPort(port)
+	portAlloc.Release(port)
+	slog.Info(proto+" tunnel unregistered", "port", port)
+}
+
 func handleConnection(conn net.Conn) {
 	remote := conn.RemoteAddr().String()
 	slog.Info("new TCP connection", "remote", remote)
@@ -249,9 +280,7 @@ func handleConnection(conn net.Conn) {
 	case protocol.ProtoUDP:
 		handleUDPTunnel(session, controlStream, req, remote)
 	default:
-		resp := &protocol.TunnelResponse{Success: false, Error: fmt.Sprintf("unsupported protocol: %s", req.Protocol)}
-		protocol.WriteResponse(controlStream, resp)
-		controlStream.Close()
+		sendErrorAndClose(controlStream, fmt.Sprintf("unsupported protocol: %s", req.Protocol))
 	}
 }
 

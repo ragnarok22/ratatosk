@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"testing/fstest"
 	"time"
@@ -65,6 +66,46 @@ func (l *stubListener) Close() error {
 }
 
 func (l *stubListener) Addr() net.Addr {
+	return stubAddr("127.0.0.1:0")
+}
+
+type errorThenCloseListener struct {
+	closed chan struct{}
+	err    error
+	mu     sync.Mutex
+	sent   bool
+}
+
+func newErrorThenCloseListener(err error) *errorThenCloseListener {
+	return &errorThenCloseListener{
+		closed: make(chan struct{}),
+		err:    err,
+	}
+}
+
+func (l *errorThenCloseListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	if !l.sent {
+		l.sent = true
+		l.mu.Unlock()
+		return nil, l.err
+	}
+	l.mu.Unlock()
+
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *errorThenCloseListener) Close() error {
+	select {
+	case <-l.closed:
+	default:
+		close(l.closed)
+	}
+	return nil
+}
+
+func (l *errorThenCloseListener) Addr() net.Addr {
 	return stubAddr("127.0.0.1:0")
 }
 

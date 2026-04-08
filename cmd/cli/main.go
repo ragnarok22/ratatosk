@@ -20,17 +20,17 @@ import (
 var Version = "dev"
 
 var (
-	cliArgs            = func() []string { return os.Args }
-	cliGetenv          = os.Getenv
-	cliStdout io.Writer = os.Stdout
-	cliStderr io.Writer = os.Stderr
-	cliExit            = os.Exit
-	cliUpdateCLI       = updater.UpdateCLI
-	cliRunClient       = runClient
-	cliRunRawClient    = runRawClient
-	cliStartInspector  = inspector.StartServer
-	cliResolveUDPAddr  = net.ResolveUDPAddr
-	cliDialUDP         = net.DialUDP
+	cliArgs                     = func() []string { return os.Args }
+	cliGetenv                   = os.Getenv
+	cliStdout         io.Writer = os.Stdout
+	cliStderr         io.Writer = os.Stderr
+	cliExit                     = os.Exit
+	cliUpdateCLI                = updater.UpdateCLI
+	cliRunClient                = runClient
+	cliRunRawClient             = runRawClient
+	cliStartInspector           = inspector.StartServer
+	cliResolveUDPAddr           = net.ResolveUDPAddr
+	cliDialUDP                  = net.DialUDP
 )
 
 func main() {
@@ -65,6 +65,15 @@ func run(
 		}
 	}
 
+	return runHTTPCommand(args, getenv, stdout, stderr, runClientFn)
+}
+
+func runHTTPCommand(
+	args []string,
+	getenv func(string) string,
+	stdout, stderr io.Writer,
+	runClientFn func(string, int, string) error,
+) int {
 	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
 	flags.SetOutput(stderr)
 
