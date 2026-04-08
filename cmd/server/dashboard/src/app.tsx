@@ -53,9 +53,7 @@ function App() {
 
       <main className="p-6">
         {tunnels.length === 0 ? (
-          <p className="py-16 text-center text-[#8b949e]">
-            No active tunnels
-          </p>
+          <p className="py-16 text-center text-[#8b949e]">No active tunnels</p>
         ) : (
           <div className="overflow-hidden rounded-lg border border-[#30363d]">
             <table className="w-full border-collapse">
