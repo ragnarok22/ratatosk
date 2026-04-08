@@ -1,0 +1,37 @@
+# Ratatosk CLI Client - Docker Compose
+# Run on your homelab/local machine to expose a local service.
+#
+# Usage:
+#   cp .env.example .env    # Set RATATOSK_SERVER to your relay address
+#   docker compose -f client.docker-compose.yml up -d
+#
+# Note: Uses host networking so the CLI can reach local services.
+# On Docker Desktop (Mac/Windows), replace network_mode with:
+#   extra_hosts:
+#     - "host.docker.internal:host-gateway"
+# and use host.docker.internal instead of localhost as the target.
+
+services:
+  ratatosk-client:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.cli
+    container_name: ratatosk-client
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      - RATATOSK_SERVER=${RATATOSK_SERVER:?Set RATATOSK_SERVER to your relay address (e.g., tunnel.example.com:7000)}
+    command:
+      - "--server=${RATATOSK_SERVER}"
+      - "--port=${RATATOSK_PORT:-3000}"
+    labels:
+      - "com.centurylinklabs.watchtower.enable=true"
+
+# CasaOS metadata
+x-casaos:
+  title:
+    en_us: Ratatosk Tunnel Client
+  description:
+    en_us: Expose local services to the internet via a Ratatosk tunnel
+  icon: https://raw.githubusercontent.com/ragnarok22/ratatosk/main/ratatosk-logo.png
+  category: Network

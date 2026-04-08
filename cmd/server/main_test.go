@@ -59,6 +59,10 @@ func TestHandleConnectionHandshake(t *testing.T) {
 	if resp.Subdomain == "" {
 		t.Fatal("empty subdomain in response")
 	}
+	expectedURL := cfg.TunnelURL(resp.Subdomain)
+	if resp.URL != expectedURL {
+		t.Errorf("URL = %q, want %q", resp.URL, expectedURL)
+	}
 
 	// Verify the subdomain was registered.
 	if !registry.HasSubdomain(resp.Subdomain) {

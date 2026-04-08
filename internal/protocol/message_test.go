@@ -70,6 +70,36 @@ func TestTunnelResponseRoundTripError(t *testing.T) {
 	}
 }
 
+func TestTunnelResponseRoundTripWithURL(t *testing.T) {
+	resp := &TunnelResponse{Subdomain: "cool-bear-5678", URL: "http://cool-bear-5678.localhost:8080", Success: true}
+
+	var buf bytes.Buffer
+	if err := WriteResponse(&buf, resp); err != nil {
+		t.Fatalf("WriteResponse: %v", err)
+	}
+
+	got, err := ReadResponse(&buf)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if got.URL != resp.URL {
+		t.Errorf("URL = %q, want %q", got.URL, resp.URL)
+	}
+}
+
+func TestTunnelResponseURLOmitEmpty(t *testing.T) {
+	resp := &TunnelResponse{Subdomain: "neat-hawk-0001", Success: true}
+
+	var buf bytes.Buffer
+	if err := WriteResponse(&buf, resp); err != nil {
+		t.Fatalf("WriteResponse: %v", err)
+	}
+
+	if strings.Contains(buf.String(), `"url"`) {
+		t.Errorf("JSON contains 'url' key despite omitempty: %s", buf.String())
+	}
+}
+
 func TestTunnelResponseOmitEmptyError(t *testing.T) {
 	resp := &TunnelResponse{Subdomain: "calm-deer-0001", Success: true}
 

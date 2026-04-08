@@ -206,6 +206,51 @@ docker run -d \
   ratatosk-server
 ```
 
+## Deploying with Docker Compose
+
+Docker Compose templates are available in [`deploy/compose/`](https://github.com/ragnarok22/ratatosk/tree/main/deploy/compose) for both server and client deployments.
+
+### Server
+
+```sh
+cd deploy/compose
+cp .env.example .env
+# Edit .env with your domain, ports, and TLS settings
+docker compose -f server.docker-compose.yml up -d
+```
+
+### Client
+
+```sh
+cd deploy/compose
+cp .env.example .env
+# Set RATATOSK_SERVER to your relay address
+docker compose -f client.docker-compose.yml up -d
+```
+
+The client uses `network_mode: host` on Linux so it can reach local services. On Docker Desktop (Mac/Windows), see the comments in the compose file for alternatives.
+
+### Full Stack (Development)
+
+For local testing with both server and client:
+
+```sh
+docker compose -f full-stack.docker-compose.yml up --build
+```
+
+## Home Assistant Add-on
+
+If you run Home Assistant, you can install Ratatosk as an add-on to expose your dashboard without port forwarding.
+
+1. In Home Assistant, go to **Settings > Add-ons > Add-on Store**
+2. Click the menu (top right) and select **Repositories**
+3. Add: `https://github.com/ragnarok22/ratatosk`
+4. Install "Ratatosk Tunnel" from the store
+5. Configure the `server` option with your relay server address (e.g., `tunnel.yourdomain.com:7000`)
+6. Start the add-on
+
+The add-on exposes your HA instance (default port 8123) through the tunnel. See [`home-assistant/ratatosk/DOCS.md`](https://github.com/ragnarok22/ratatosk/blob/main/home-assistant/ratatosk/DOCS.md) for full configuration options.
+
 ## Troubleshooting
 
 **"bind: permission denied" on port 443 or 80**

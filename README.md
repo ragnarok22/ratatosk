@@ -144,11 +144,14 @@ sudo cp bin/cli /usr/local/bin/ratatosk
 
 | Command | Description |
 |---------|-------------|
+| `ratatosk --server host:port` | Connect to a specific relay server (default: `localhost:7000`) |
 | `ratatosk --port <port>` | Expose a local service (default: 3000) |
 | `ratatosk --basic-auth user:pass` | Require HTTP Basic Auth for tunnel visitors |
 | `ratatosk --streamer` | Enable streamer mode (redact sensitive data from output) |
 | `ratatosk version` | Print the CLI version |
 | `ratatosk self-update` | Check for updates and self-update (defers to `brew upgrade` if installed via Homebrew) |
+
+The `--server` flag can also be set via the `RATATOSK_SERVER` environment variable.
 
 ### Usage
 
@@ -267,6 +270,36 @@ sudo journalctl -u ratatosk -f
 ```
 
 The systemd unit uses `AmbientCapabilities=CAP_NET_BIND_SERVICE` so the server can bind to ports 80 and 443 without running as root.
+
+## Homelab & Docker
+
+### Docker Compose
+
+Ready-to-use Docker Compose templates are provided in [`deploy/compose/`](deploy/compose/) for quick deployment:
+
+- **`server.docker-compose.yml`** -- Deploy the relay server on a VPS
+- **`client.docker-compose.yml`** -- Run the CLI client in your homelab
+- **`full-stack.docker-compose.yml`** -- Combined server + client for testing
+
+```sh
+cd deploy/compose
+cp .env.example .env   # Edit with your settings
+docker compose -f server.docker-compose.yml up -d
+```
+
+The templates include CasaOS and Portainer-compatible metadata.
+
+### Home Assistant Add-on
+
+Ratatosk can be installed as a Home Assistant Add-on to securely expose your smart home dashboard without port forwarding.
+
+1. In Home Assistant, go to **Settings > Add-ons > Add-on Store**
+2. Click the menu (top right) and select **Repositories**
+3. Add the repository URL: `https://github.com/ragnarok22/ratatosk`
+4. Find "Ratatosk Tunnel" in the store and install it
+5. Configure the `server` option with your relay server address
+
+See [`home-assistant/ratatosk/DOCS.md`](home-assistant/ratatosk/DOCS.md) for full configuration details.
 
 ## Development
 

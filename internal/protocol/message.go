@@ -17,6 +17,7 @@ type TunnelRequest struct {
 // TunnelResponse is sent by the server after processing a tunnel request.
 type TunnelResponse struct {
 	Subdomain string `json:"subdomain"`
+	URL       string `json:"url,omitempty"`
 	Success   bool   `json:"success"`
 	Error     string `json:"error,omitempty"`
 }

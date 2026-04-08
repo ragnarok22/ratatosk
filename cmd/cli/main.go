@@ -33,10 +33,15 @@ func main() {
 		}
 	}
 
+	server := flag.String("server", "localhost:7000", "relay server address (host:port)")
 	port := flag.Int("port", 3000, "local port to expose")
 	streamer := flag.Bool("streamer", false, "redact sensitive data from output for streaming")
 	basicAuth := flag.String("basic-auth", "", "require basic auth for tunnel visitors (format: user:pass)")
 	flag.Parse()
+
+	if env := os.Getenv("RATATOSK_SERVER"); env != "" && *server == "localhost:7000" {
+		*server = env
+	}
 
 	if *basicAuth != "" && !strings.Contains(*basicAuth, ":") {
 		fmt.Fprintf(os.Stderr, "Error: --basic-auth must be in 'user:pass' format\n")
@@ -46,7 +51,7 @@ func main() {
 	redact.Enabled = *streamer
 	slog.SetDefault(slog.New(redact.NewHandler(slog.NewTextHandler(os.Stdout, nil))))
 
-	if err := runClient("localhost:7000", *port, *basicAuth); err != nil {
+	if err := runClient(*server, *port, *basicAuth); err != nil {
 		slog.Error("client error", "error", err)
 		os.Exit(1)
 	}
@@ -92,13 +97,18 @@ func runClient(serverAddr string, localPort int, basicAuth string) error {
 	logger := inspector.NewLogger()
 	inspectorAddr, inspectorErr := inspector.StartServer(logger)
 
+	tunnelURL := resp.URL
+	if tunnelURL == "" {
+		tunnelURL = fmt.Sprintf("http://%s.localhost:8080", resp.Subdomain)
+	}
+
 	fmt.Println()
 	fmt.Println("Ratatosk                        (Ctrl+C to quit)")
 	fmt.Println()
 	if redact.Enabled {
-		fmt.Printf("Forwarding      http://%s.localhost:8080 -> http://localhost:[REDACTED]\n", resp.Subdomain)
+		fmt.Printf("Forwarding      %s -> http://localhost:[REDACTED]\n", tunnelURL)
 	} else {
-		fmt.Printf("Forwarding      http://%s.localhost:8080 -> http://localhost:%d\n", resp.Subdomain, localPort)
+		fmt.Printf("Forwarding      %s -> http://localhost:%d\n", tunnelURL, localPort)
 	}
 	if basicAuth != "" {
 		fmt.Printf("Basic Auth      enabled (user: %s)\n", strings.SplitN(basicAuth, ":", 2)[0])

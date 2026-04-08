@@ -50,7 +50,7 @@ jobs:
 
       - name: Build CLI Binaries
         run: |
-          targets="linux/amd64 darwin/arm64 darwin/amd64 windows/amd64"
+          targets="linux/amd64 linux/arm64 linux/arm darwin/arm64 darwin/amd64 windows/amd64"
           for target in $targets; do
             os="${target%/*}"
             arch="${target#*/}"
@@ -79,6 +79,9 @@ jobs:
           cp deploy/ratatosk.yaml.example dist/
           cp deploy/ratatosk.service dist/
           cp deploy/Dockerfile.server dist/
+          cp deploy/Dockerfile.cli dist/
+          cp deploy/compose/*.yml dist/
+          cp deploy/compose/.env.example dist/
 
       - name: Generate Changelog
         id: changelog
@@ -112,15 +115,24 @@ jobs:
           files: |
             dist/ratatosk-server-linux-amd64
             dist/ratatosk-cli-linux-amd64
+            dist/ratatosk-cli-linux-arm64
+            dist/ratatosk-cli-linux-arm
             dist/ratatosk-cli-darwin-arm64
             dist/ratatosk-cli-darwin-amd64
             dist/ratatosk-cli-windows-amd64.exe
             dist/ratatosk-cli-linux-amd64.tar.gz
+            dist/ratatosk-cli-linux-arm64.tar.gz
+            dist/ratatosk-cli-linux-arm.tar.gz
             dist/ratatosk-cli-darwin-arm64.tar.gz
             dist/ratatosk-cli-darwin-amd64.tar.gz
             dist/ratatosk.yaml.example
             dist/ratatosk.service
             dist/Dockerfile.server
+            dist/Dockerfile.cli
+            dist/server.docker-compose.yml
+            dist/client.docker-compose.yml
+            dist/full-stack.docker-compose.yml
+            dist/.env.example
 
   update-homebrew:
     needs: release
@@ -131,7 +143,7 @@ jobs:
           tag=${GITHUB_REF#refs/tags/}
           base_url="https://github.com/${{ github.repository }}/releases/download/${tag}"
           mkdir -p tarballs
-          for name in ratatosk-cli-darwin-arm64 ratatosk-cli-darwin-amd64 ratatosk-cli-linux-amd64; do
+          for name in ratatosk-cli-darwin-arm64 ratatosk-cli-darwin-amd64 ratatosk-cli-linux-amd64 ratatosk-cli-linux-arm64; do
             curl -fsSL "${base_url}/${name}.tar.gz" -o "tarballs/${name}.tar.gz"
           done
 
@@ -141,6 +153,7 @@ jobs:
           echo "darwin_arm64=$(sha256sum tarballs/ratatosk-cli-darwin-arm64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
           echo "darwin_amd64=$(sha256sum tarballs/ratatosk-cli-darwin-amd64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
           echo "linux_amd64=$(sha256sum tarballs/ratatosk-cli-linux-amd64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "linux_arm64=$(sha256sum tarballs/ratatosk-cli-linux-arm64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
       - name: Update Homebrew formula
         env:
@@ -173,7 +186,10 @@ jobs:
             end
 
             on_linux do
-              if Hardware::CPU.intel?
+              if Hardware::CPU.arm?
+                url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-linux-arm64.tar.gz"
+                sha256 "${{ steps.hashes.outputs.linux_arm64 }}"
+              elsif Hardware::CPU.intel?
                 url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-linux-amd64.tar.gz"
                 sha256 "${{ steps.hashes.outputs.linux_amd64 }}"
               end
@@ -219,7 +235,7 @@ jobs:
             type=semver,pattern={{major}}.{{minor}}
             type=raw,value=latest
 
-      - name: Build and push
+      - name: Build and push server image
         uses: docker/build-push-action@v6
         with:
           context: .
@@ -227,3 +243,22 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+
+      - name: Extract CLI metadata
+        id: cli-meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository_owner }}/ratatosk-cli
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and push CLI image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: deploy/Dockerfile.cli
+          push: true
+          tags: ${{ steps.cli-meta.outputs.tags }}
+          labels: ${{ steps.cli-meta.outputs.labels }}

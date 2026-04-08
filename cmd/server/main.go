@@ -149,7 +149,7 @@ func handleConnection(conn net.Conn) {
 
 	registry.Register(subdomain, session, req.BasicAuth)
 
-	resp := &protocol.TunnelResponse{Subdomain: subdomain, Success: true}
+	resp := &protocol.TunnelResponse{Subdomain: subdomain, URL: cfg.TunnelURL(subdomain), Success: true}
 	if err := protocol.WriteResponse(controlStream, resp); err != nil {
 		slog.Error("failed to send tunnel response", "remote", remote, "error", err)
 		registry.Unregister(subdomain)

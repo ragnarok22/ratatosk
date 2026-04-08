@@ -1,0 +1,40 @@
+# Ratatosk Full Stack - Docker Compose
+# Runs both the relay server and a CLI client for development and testing.
+#
+# Usage:
+#   docker compose -f full-stack.docker-compose.yml up --build
+#
+# The server runs on localhost with default ports.
+# The client connects via host networking and creates a tunnel to
+# a local service on port 3000.
+
+services:
+  server:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.server
+    container_name: ratatosk-server
+    ports:
+      - "7000:7000"
+      - "8080:8080"
+      - "8081:8081"
+    environment:
+      - RATATOSK_BASE_DOMAIN=localhost
+      - RATATOSK_PUBLIC_PORT=8080
+      - RATATOSK_ADMIN_PORT=8081
+      - RATATOSK_CONTROL_PORT=7000
+
+  client:
+    build:
+      context: ../..
+      dockerfile: deploy/Dockerfile.cli
+    container_name: ratatosk-client
+    depends_on:
+      - server
+    command:
+      - "--server=localhost:7000"
+      - "--port=${RATATOSK_PORT:-3000}"
+    # Host networking lets the client reach both the server (via mapped ports)
+    # and local services on the host machine.
+    network_mode: host
+    restart: on-failure

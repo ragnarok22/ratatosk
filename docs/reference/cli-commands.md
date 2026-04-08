@@ -12,6 +12,7 @@ ratatosk [command] [flags]
 
 | Command | Description |
 |---------|-------------|
+| `ratatosk --server host:port` | Connect to a specific relay server (default: `localhost:7000`) |
 | `ratatosk --port <port>` | Expose a local service (default: 3000) |
 | `ratatosk --basic-auth user:pass` | Require HTTP Basic Auth for tunnel visitors |
 | `ratatosk --streamer` | Enable streamer mode (redact sensitive data from output) |
@@ -19,6 +20,20 @@ ratatosk [command] [flags]
 | `ratatosk self-update` | Check for updates and self-update |
 
 ## Flags
+
+### `--server`
+
+The relay server address to connect to.
+
+- **Type:** string
+- **Default:** `localhost:7000`
+- **Environment variable:** `RATATOSK_SERVER`
+
+```sh
+ratatosk --server tunnel.example.com:7000 --port 3000
+```
+
+When pointing at a remote relay server (e.g., deployed on a VPS), this flag is required. The environment variable is useful for Docker and Home Assistant deployments where flags may not be convenient.
 
 ### `--port`
 

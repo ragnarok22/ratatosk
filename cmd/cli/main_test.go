@@ -302,6 +302,7 @@ func TestRunClientStreamerBanner(t *testing.T) {
 		protocol.WriteResponse(cs, &protocol.TunnelResponse{
 			Success:   true,
 			Subdomain: "test-streamer",
+			URL:       "http://test-streamer.localhost:8080",
 		})
 		cs.Close()
 
