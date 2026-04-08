@@ -70,6 +70,10 @@ make test-race     # run with the race detector
 make coverage      # generate and display coverage report
 ```
 
+## Community
+
+Please read the [Code of Conduct](./CODE_OF_CONDUCT.md) before participating in issues, pull requests, or discussions.
+
 ## Build
 
 Compile both binaries into `bin/`:
