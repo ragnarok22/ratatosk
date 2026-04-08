@@ -5,6 +5,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/hashicorp/yamux"
 )
@@ -188,6 +189,134 @@ func TestRegisterWithBasicAuth(t *testing.T) {
 	if entry.BasicAuth != "admin:secret" {
 		t.Errorf("BasicAuth = %q, want %q", entry.BasicAuth, "admin:secret")
 	}
+}
+
+func TestRegisterPort(t *testing.T) {
+	r := NewRegistry()
+	_, session := newTestSession(t)
+
+	entry := &TunnelEntry{
+		Session:     session,
+		ConnectedAt: time.Now(),
+		Protocol:    "tcp",
+		PublicPort:  12345,
+	}
+	r.RegisterPort(12345, entry)
+
+	got, ok := r.GetPortEntry(12345)
+	if !ok {
+		t.Fatal("GetPortEntry returned false for registered port")
+	}
+	if got.Protocol != "tcp" {
+		t.Errorf("Protocol = %q, want %q", got.Protocol, "tcp")
+	}
+}
+
+func TestUnregisterPort(t *testing.T) {
+	r := NewRegistry()
+	_, session := newTestSession(t)
+
+	entry := &TunnelEntry{
+		Session:     session,
+		ConnectedAt: time.Now(),
+		Protocol:    "tcp",
+		PublicPort:  12345,
+	}
+	r.RegisterPort(12345, entry)
+	r.UnregisterPort(12345)
+
+	_, ok := r.GetPortEntry(12345)
+	if ok {
+		t.Fatal("GetPortEntry returned true after UnregisterPort")
+	}
+}
+
+func TestGetPortEntryNotFound(t *testing.T) {
+	r := NewRegistry()
+	_, ok := r.GetPortEntry(99999)
+	if ok {
+		t.Fatal("GetPortEntry returned true for unregistered port")
+	}
+}
+
+func TestListTunnelsMixed(t *testing.T) {
+	r := NewRegistry()
+	_, sess1 := newTestSession(t)
+	_, sess2 := newTestSession(t)
+
+	r.Register("alpha", sess1, "")
+	r.RegisterPort(12345, &TunnelEntry{
+		Session:     sess2,
+		ConnectedAt: time.Now(),
+		Protocol:    "tcp",
+		PublicPort:  12345,
+	})
+
+	tunnels := r.ListTunnels()
+	if len(tunnels) != 2 {
+		t.Fatalf("expected 2 tunnels, got %d", len(tunnels))
+	}
+
+	var hasSub, hasPort bool
+	for _, ti := range tunnels {
+		if ti.Subdomain == "alpha" {
+			hasSub = true
+		}
+		if ti.PublicPort == 12345 && ti.Protocol == "tcp" {
+			hasPort = true
+		}
+	}
+	if !hasSub {
+		t.Error("missing HTTP tunnel in ListTunnels")
+	}
+	if !hasPort {
+		t.Error("missing TCP tunnel in ListTunnels")
+	}
+}
+
+func TestConcurrentPortAccess(t *testing.T) {
+	r := NewRegistry()
+
+	const n = 50
+	sessions := make([]*yamux.Session, n)
+	for i := range sessions {
+		_, sess := newTestSession(t)
+		sessions[i] = sess
+	}
+
+	var wg sync.WaitGroup
+
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			r.RegisterPort(40000+i, &TunnelEntry{
+				Session:     sessions[i],
+				ConnectedAt: time.Now(),
+				Protocol:    "tcp",
+				PublicPort:  40000 + i,
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, _ = r.GetPortEntry(40000 + i)
+		}(i)
+	}
+	wg.Wait()
+
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			r.UnregisterPort(40000 + i)
+		}(i)
+	}
+	wg.Wait()
 }
 
 func TestConcurrentAccess(t *testing.T) {

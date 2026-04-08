@@ -12,13 +12,15 @@ import (
 
 // ServerConfig holds all configuration for the relay server.
 type ServerConfig struct {
-	BaseDomain  string `mapstructure:"base_domain"`
-	PublicPort  int    `mapstructure:"public_port"`
-	AdminPort   int    `mapstructure:"admin_port"`
-	ControlPort int    `mapstructure:"control_port"`
-	TLSEnabled  bool   `mapstructure:"tls_enabled"`
-	TLSCertFile string `mapstructure:"tls_cert_file"`
-	TLSKeyFile  string `mapstructure:"tls_key_file"`
+	BaseDomain     string `mapstructure:"base_domain"`
+	PublicPort     int    `mapstructure:"public_port"`
+	AdminPort      int    `mapstructure:"admin_port"`
+	ControlPort    int    `mapstructure:"control_port"`
+	TLSEnabled     bool   `mapstructure:"tls_enabled"`
+	TLSCertFile    string `mapstructure:"tls_cert_file"`
+	TLSKeyFile     string `mapstructure:"tls_key_file"`
+	PortRangeStart int    `mapstructure:"port_range_start"`
+	PortRangeEnd   int    `mapstructure:"port_range_end"`
 }
 
 // PublicAddr returns the listen address for the public HTTP(S) server.
@@ -65,6 +67,8 @@ func LoadConfig() (*ServerConfig, error) {
 	v.SetDefault("tls_enabled", false)
 	v.SetDefault("tls_cert_file", "")
 	v.SetDefault("tls_key_file", "")
+	v.SetDefault("port_range_start", 10000)
+	v.SetDefault("port_range_end", 20000)
 
 	// Config file search.
 	v.SetConfigName("ratatosk")

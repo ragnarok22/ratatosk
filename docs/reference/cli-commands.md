@@ -12,14 +12,54 @@ ratatosk [command] [flags]
 
 | Command | Description |
 |---------|-------------|
+| `ratatosk --port <port>` | Expose a local HTTP service (default: 3000) |
+| `ratatosk tcp <port>` | Expose a local TCP service (e.g., SSH, PostgreSQL) |
+| `ratatosk udp <port>` | Expose a local UDP service (e.g., game servers) |
 | `ratatosk --server host:port` | Connect to a specific relay server (default: `localhost:7000`) |
-| `ratatosk --port <port>` | Expose a local service (default: 3000) |
 | `ratatosk --basic-auth user:pass` | Require HTTP Basic Auth for tunnel visitors |
 | `ratatosk --streamer` | Enable streamer mode (redact sensitive data from output) |
 | `ratatosk version` | Print the CLI version |
 | `ratatosk self-update` | Check for updates and self-update |
 
-## Flags
+## Subcommands
+
+### `tcp`
+
+Expose a local TCP service through the tunnel. The relay server allocates a public port and forwards raw TCP traffic bidirectionally.
+
+```sh
+ratatosk tcp <port> [--server host:port]
+```
+
+Examples:
+
+```sh
+ratatosk tcp 22                                    # Expose local SSH
+ratatosk tcp 5432 --server tunnel.example.com:7000 # Expose PostgreSQL
+```
+
+The `--server` flag and `RATATOSK_SERVER` environment variable work the same as with HTTP tunnels.
+
+### `udp`
+
+Expose a local UDP service through the tunnel. UDP datagrams are framed over the yamux TCP connection, preserving message boundaries. Each remote client gets its own multiplexed stream with automatic idle cleanup (60s timeout).
+
+```sh
+ratatosk udp <port> [--server host:port]
+```
+
+Examples:
+
+```sh
+ratatosk udp 25565                                  # Expose Minecraft server
+ratatosk udp 27015 --server tunnel.example.com:7000 # Expose game server
+```
+
+::: tip
+TCP and UDP tunnels do not support `--basic-auth` or `--streamer` flags. These features are specific to HTTP tunnels.
+:::
+
+## HTTP Flags
 
 ### `--server`
 
@@ -124,4 +164,22 @@ Combine basic auth with streamer mode:
 
 ```sh
 ratatosk --port 3000 --basic-auth "admin:secret" --streamer
+```
+
+Expose a local SSH server:
+
+```sh
+ratatosk tcp 22
+```
+
+Expose a Minecraft server:
+
+```sh
+ratatosk udp 25565
+```
+
+Expose a database to a remote colleague:
+
+```sh
+ratatosk tcp 5432 --server tunnel.example.com:7000
 ```

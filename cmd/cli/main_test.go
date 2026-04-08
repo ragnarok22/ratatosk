@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -20,6 +21,8 @@ import (
 	"ratatosk/internal/redact"
 	"ratatosk/internal/tunnel"
 )
+
+var noopRawClient = func(string, int, string) error { return nil }
 
 func startMockRelay(t *testing.T, handler func(net.Conn)) string {
 	t.Helper()
@@ -58,6 +61,7 @@ func TestRunVersionCommand(t *testing.T) {
 			t.Fatal("runClient should not be called")
 			return nil
 		},
+		noopRawClient,
 	)
 
 	if code != 0 {
@@ -68,6 +72,36 @@ func TestRunVersionCommand(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestMainVersionCommand(t *testing.T) {
+	oldArgs := os.Args
+	oldStdout := os.Stdout
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		os.Stdout = oldStdout
+	})
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer r.Close()
+
+	os.Args = []string{"ratatosk", "version"}
+	os.Stdout = w
+
+	main()
+
+	w.Close()
+	output, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+
+	if !strings.Contains(string(output), "Ratatosk CLI version:") {
+		t.Fatalf("stdout = %q, want version output", string(output))
 	}
 }
 
@@ -96,6 +130,7 @@ func TestRunSelfUpdateCommand(t *testing.T) {
 				t.Fatal("runClient should not be called")
 				return nil
 			},
+			noopRawClient,
 		)
 
 		if code != 0 {
@@ -120,6 +155,7 @@ func TestRunSelfUpdateCommand(t *testing.T) {
 				t.Fatal("runClient should not be called")
 				return nil
 			},
+			noopRawClient,
 		)
 
 		if code != 1 {
@@ -163,6 +199,7 @@ func TestRunUsesEnvOverride(t *testing.T) {
 			gotAuth = basicAuth
 			return nil
 		},
+		noopRawClient,
 	)
 
 	if code != 0 {
@@ -209,6 +246,7 @@ func TestRunExplicitServerBeatsEnvOverride(t *testing.T) {
 			gotServer = server
 			return nil
 		},
+		noopRawClient,
 	)
 
 	if code != 0 {
@@ -243,6 +281,7 @@ func TestRunRejectsInvalidBasicAuth(t *testing.T) {
 			t.Fatal("runClient should not be called")
 			return nil
 		},
+		noopRawClient,
 	)
 
 	if code != 1 {
@@ -274,6 +313,7 @@ func TestRunStreamerFlagAndClientError(t *testing.T) {
 			return nil
 		},
 		func(string, int, string) error { return errors.New("dial failed") },
+		noopRawClient,
 	)
 
 	if code != 1 {
@@ -576,5 +616,398 @@ func TestRunClientStreamerBanner(t *testing.T) {
 	}
 	if !strings.Contains(output, "[REDACTED]") {
 		t.Errorf("expected [REDACTED] in banner: %s", output)
+	}
+}
+
+func TestRunTCPCommand(t *testing.T) {
+	oldLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	var gotServer string
+	var gotPort int
+	var gotProto string
+
+	code := run(
+		[]string{"ratatosk", "tcp", "22"},
+		func(string) string { return "" },
+		&stdout,
+		&stderr,
+		func(string) error { return nil },
+		func(string, int, string) error { return nil },
+		func(server string, port int, proto string) error {
+			gotServer = server
+			gotPort = port
+			gotProto = proto
+			return nil
+		},
+	)
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if gotServer != "localhost:7000" {
+		t.Errorf("server = %q, want %q", gotServer, "localhost:7000")
+	}
+	if gotPort != 22 {
+		t.Errorf("port = %d, want 22", gotPort)
+	}
+	if gotProto != protocol.ProtoTCP {
+		t.Errorf("proto = %q, want %q", gotProto, protocol.ProtoTCP)
+	}
+}
+
+func TestRunUDPCommand(t *testing.T) {
+	oldLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	var gotPort int
+	var gotProto string
+
+	code := run(
+		[]string{"ratatosk", "udp", "25565"},
+		func(string) string { return "" },
+		&stdout,
+		&stderr,
+		func(string) error { return nil },
+		func(string, int, string) error { return nil },
+		func(server string, port int, proto string) error {
+			gotPort = port
+			gotProto = proto
+			return nil
+		},
+	)
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
+	}
+	if gotPort != 25565 {
+		t.Errorf("port = %d, want 25565", gotPort)
+	}
+	if gotProto != protocol.ProtoUDP {
+		t.Errorf("proto = %q, want %q", gotProto, protocol.ProtoUDP)
+	}
+}
+
+func TestRunTCPCommandMissingPort(t *testing.T) {
+	oldLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := run(
+		[]string{"ratatosk", "tcp"},
+		func(string) string { return "" },
+		&stdout,
+		&stderr,
+		func(string) error { return nil },
+		func(string, int, string) error { return nil },
+		noopRawClient,
+	)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "Usage:") {
+		t.Errorf("stderr = %q, want usage message", stderr.String())
+	}
+}
+
+func TestRunTCPCommandInvalidPort(t *testing.T) {
+	oldLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := run(
+		[]string{"ratatosk", "tcp", "notanumber"},
+		func(string) string { return "" },
+		&stdout,
+		&stderr,
+		func(string) error { return nil },
+		func(string, int, string) error { return nil },
+		noopRawClient,
+	)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if !strings.Contains(stderr.String(), "invalid port") {
+		t.Errorf("stderr = %q, want invalid port message", stderr.String())
+	}
+}
+
+func TestRunTCPCommandEnvOverride(t *testing.T) {
+	oldLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	var gotServer string
+
+	code := run(
+		[]string{"ratatosk", "tcp", "22"},
+		func(key string) string {
+			if key == "RATATOSK_SERVER" {
+				return "relay.example:7000"
+			}
+			return ""
+		},
+		&stdout,
+		&stderr,
+		func(string) error { return nil },
+		func(string, int, string) error { return nil },
+		func(server string, port int, proto string) error {
+			gotServer = server
+			return nil
+		},
+	)
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0", code)
+	}
+	if gotServer != "relay.example:7000" {
+		t.Errorf("server = %q, want %q", gotServer, "relay.example:7000")
+	}
+}
+
+func TestRunTCPCommandClientError(t *testing.T) {
+	oldLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := run(
+		[]string{"ratatosk", "tcp", "22"},
+		func(string) string { return "" },
+		&stdout,
+		&stderr,
+		func(string) error { return nil },
+		func(string, int, string) error { return nil },
+		func(string, int, string) error { return errors.New("connection refused") },
+	)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+}
+
+func TestRunRawClientHappyPath(t *testing.T) {
+	addr := startMockRelay(t, func(conn net.Conn) {
+		defer conn.Close()
+		session, err := tunnel.NewServerSession(conn)
+		if err != nil {
+			return
+		}
+		defer session.Close()
+
+		cs, err := session.Accept()
+		if err != nil {
+			return
+		}
+		req, err := protocol.ReadRequest(cs)
+		if err != nil {
+			cs.Close()
+			return
+		}
+		if req.Protocol != protocol.ProtoTCP {
+			cs.Close()
+			return
+		}
+		protocol.WriteResponse(cs, &protocol.TunnelResponse{
+			Success: true,
+			Port:    12345,
+		})
+		cs.Close()
+
+		time.Sleep(100 * time.Millisecond)
+	})
+
+	if err := runRawClient(addr, 22, protocol.ProtoTCP); err != nil {
+		t.Fatalf("runRawClient: %v", err)
+	}
+}
+
+func TestRunRawClientHandshakeFailure(t *testing.T) {
+	addr := startMockRelay(t, func(conn net.Conn) {
+		defer conn.Close()
+		session, err := tunnel.NewServerSession(conn)
+		if err != nil {
+			return
+		}
+		defer session.Close()
+
+		cs, err := session.Accept()
+		if err != nil {
+			return
+		}
+		protocol.ReadRequest(cs)
+		protocol.WriteResponse(cs, &protocol.TunnelResponse{
+			Success: false,
+			Error:   "port exhausted",
+		})
+		cs.Close()
+	})
+
+	err := runRawClient(addr, 22, protocol.ProtoTCP)
+	if err == nil {
+		t.Fatal("expected error for rejected handshake")
+	}
+	if !strings.Contains(err.Error(), "port exhausted") {
+		t.Errorf("error = %q, want to contain 'port exhausted'", err)
+	}
+}
+
+func TestRunRawClientConnectionRefused(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	if err := runRawClient(addr, 22, protocol.ProtoTCP); err == nil {
+		t.Fatal("expected connection error")
+	}
+}
+
+func TestHandleTCPStream(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+
+	localDone := make(chan struct{})
+	go func() {
+		defer close(localDone)
+
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			t.Errorf("ReadFull: %v", err)
+			return
+		}
+		if string(buf) != "ping" {
+			t.Errorf("got %q, want %q", string(buf), "ping")
+			return
+		}
+
+		if _, err := conn.Write([]byte("pong")); err != nil {
+			t.Errorf("Write: %v", err)
+		}
+	}()
+
+	clientStream, serverStream := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		handleTCPStream(serverStream, ln.Addr().String())
+		close(done)
+	}()
+
+	if _, err := clientStream.Write([]byte("ping")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(clientStream, buf); err != nil {
+		t.Fatalf("ReadFull: %v", err)
+	}
+	if string(buf) != "pong" {
+		t.Fatalf("got %q, want %q", string(buf), "pong")
+	}
+
+	clientStream.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleTCPStream did not return")
+	}
+
+	select {
+	case <-localDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("local TCP server did not finish")
+	}
+}
+
+func TestHandleUDPStream(t *testing.T) {
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer udpConn.Close()
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+
+		buf := make([]byte, tunnel.MaxUDPFrameSize)
+		n, addr, err := udpConn.ReadFromUDP(buf)
+		if err != nil {
+			t.Errorf("ReadFromUDP: %v", err)
+			return
+		}
+		if string(buf[:n]) != "ping" {
+			t.Errorf("got %q, want %q", string(buf[:n]), "ping")
+			return
+		}
+
+		if _, err := udpConn.WriteToUDP([]byte("pong"), addr); err != nil {
+			t.Errorf("WriteToUDP pong: %v", err)
+			return
+		}
+
+		time.Sleep(50 * time.Millisecond)
+		if _, err := udpConn.WriteToUDP([]byte("late"), addr); err != nil {
+			t.Errorf("WriteToUDP late: %v", err)
+		}
+	}()
+
+	clientStream, serverStream := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		handleUDPStream(serverStream, udpConn.LocalAddr().String())
+		close(done)
+	}()
+
+	if err := tunnel.WriteFrame(clientStream, []byte("ping")); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+
+	frame, err := tunnel.ReadFrame(clientStream)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if string(frame) != "pong" {
+		t.Fatalf("got %q, want %q", string(frame), "pong")
+	}
+
+	clientStream.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleUDPStream did not return")
+	}
+
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("local UDP server did not finish")
 	}
 }

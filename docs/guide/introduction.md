@@ -1,6 +1,6 @@
 # Introduction
 
-Ratatosk is an open-source, self-hosted reverse proxy and tunneling tool. It lets you expose local web servers to the internet securely, bypassing NAT and local firewalls -- a free alternative to [ngrok](https://ngrok.com).
+Ratatosk is an open-source, self-hosted reverse proxy and tunneling tool. It lets you expose local web servers, TCP services, and UDP endpoints to the internet securely, bypassing NAT and local firewalls -- a free alternative to [ngrok](https://ngrok.com).
 
 ## Why Ratatosk?
 
@@ -15,11 +15,11 @@ If you've ever needed to share a local development server with a colleague, demo
 
 Ratatosk has three components:
 
-1. **Relay Server** -- runs on a public VPS, listens for incoming HTTP traffic, and routes it to the correct connected client based on generated subdomains.
-2. **CLI Client** -- runs on your local machine. It establishes an outbound, persistent, multiplexed TCP connection to the relay server and forwards tunneled requests to a local port (e.g., `localhost:3000`).
+1. **Relay Server** -- runs on a public VPS, listens for incoming traffic, and routes it to the correct connected client. HTTP tunnels are routed by subdomain; TCP and UDP tunnels use dynamically allocated ports.
+2. **CLI Client** -- runs on your local machine. It establishes an outbound, persistent, multiplexed TCP connection to the relay server and forwards tunneled requests to a local port. Supports HTTP (`ratatosk --port 3000`), TCP (`ratatosk tcp 22`), and UDP (`ratatosk udp 25565`) tunnels.
 3. **Dashboard** -- a React single-page application embedded directly into the relay server binary. It provides a UI to monitor active tunnels, bandwidth, and real-time traffic via WebSockets.
 
-The core of Ratatosk relies on [yamux](https://github.com/hashicorp/yamux) to multiplex a single TCP control channel into multiple concurrent logical streams. This means the CLI client only needs one outbound TCP connection -- no extra ports need to be opened on your local router.
+The core of Ratatosk relies on [yamux](https://github.com/hashicorp/yamux) to multiplex a single TCP control channel into multiple concurrent logical streams. This means the CLI client only needs one outbound TCP connection -- no extra ports need to be opened on your local router. For TCP tunnels, raw bytes are copied bidirectionally over yamux streams. For UDP tunnels, datagrams are length-prefixed to preserve message boundaries.
 
 ## What's Next?
 

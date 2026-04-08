@@ -114,3 +114,30 @@ func TestHandlerWithAttrs(t *testing.T) {
 		t.Errorf("WithAttrs IP not redacted: %s", out)
 	}
 }
+
+func TestHandlerWithGroup(t *testing.T) {
+	Enabled = true
+	defer func() { Enabled = false }()
+
+	var buf bytes.Buffer
+	inner := slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		ReplaceAttr: func(_ []string, a slog.Attr) slog.Attr {
+			if a.Key == slog.TimeKey {
+				return slog.Attr{}
+			}
+			return a
+		},
+	})
+	handler := NewHandler(inner).WithGroup("network")
+	logger := slog.New(handler)
+
+	logger.Info("connected to 192.168.1.5:9000", "addr", "10.0.0.1:3000")
+
+	out := buf.String()
+	if !strings.Contains(out, "network.addr") {
+		t.Errorf("expected grouped attr in output: %s", out)
+	}
+	if strings.Contains(out, "10.0.0.1") {
+		t.Errorf("WithGroup IP not redacted: %s", out)
+	}
+}
