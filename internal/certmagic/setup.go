@@ -9,6 +9,10 @@ import (
 	"github.com/libdns/cloudflare"
 )
 
+// httpsFunc is the function that starts the HTTPS server. It defaults to
+// certmagic.HTTPS and can be replaced in tests.
+var httpsFunc = certmagic.HTTPS
+
 // Config holds the parameters needed for automatic TLS provisioning.
 type Config struct {
 	Email    string
@@ -50,5 +54,5 @@ func SetupAndServe(cfg Config, handler http.Handler) error {
 		"provider", cfg.Provider,
 	)
 
-	return certmagic.HTTPS(cfg.Domains, handler)
+	return httpsFunc(cfg.Domains, handler)
 }
