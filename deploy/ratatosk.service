@@ -1,6 +1,6 @@
 [Unit]
 Description=Ratatosk Relay Server
-Documentation=https://github.com/reinier-hernandez/ratatosk
+Documentation=https://github.com/ragnarok22/ratatosk
 After=network-online.target
 Wants=network-online.target
 

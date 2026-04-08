@@ -27,7 +27,7 @@ The relay server runs on a public VPS. It accepts CLI client connections and rou
 ```sh
 docker run -d --name ratatosk \
   -p 7000:7000 -p 8080:8080 -p 8081:8081 \
-  ghcr.io/reinier-hernandez/ratatosk-server
+  ghcr.io/ragnarok22/ratatosk-server
 ```
 
 To pass a config file:
@@ -36,13 +36,13 @@ To pass a config file:
 docker run -d --name ratatosk \
   -v /path/to/ratatosk.yaml:/etc/ratatosk/ratatosk.yaml:ro \
   -p 7000:7000 -p 443:443 -p 8081:8081 \
-  ghcr.io/reinier-hernandez/ratatosk-server
+  ghcr.io/ragnarok22/ratatosk-server
 ```
 
 ### Build from Source
 
 ```sh
-git clone https://github.com/reinier-hernandez/ratatosk.git
+git clone https://github.com/ragnarok22/ratatosk.git
 cd ratatosk
 make build
 sudo cp bin/server /usr/local/bin/ratatosk-server
@@ -109,12 +109,12 @@ brew install ratatosk
 
 ### Download a Binary
 
-Grab the latest release for your platform from the [Releases](https://github.com/reinier-hernandez/ratatosk/releases) page.
+Grab the latest release for your platform from the [Releases](https://github.com/ragnarok22/ratatosk/releases) page.
 
 ### Build from Source
 
 ```sh
-git clone https://github.com/reinier-hernandez/ratatosk.git
+git clone https://github.com/ragnarok22/ratatosk.git
 cd ratatosk
 make build
 sudo cp bin/cli /usr/local/bin/ratatosk
