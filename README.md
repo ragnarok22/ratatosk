@@ -16,106 +16,47 @@
 > [!WARNING]
 > Ratatosk is currently in alpha. Expect rough edges and frequent breaking changes while the core architecture, APIs, and workflows are still being stabilized.
 
-Open-source, self-hosted reverse proxy and tunneling tool. A free alternative to ngrok.
+Open-source, self-hosted reverse proxy and tunneling tool. A free alternative to ngrok. Expose local web servers to the internet securely, bypassing NAT and local firewalls.
 
-Expose local web servers to the internet securely, bypassing NAT and local firewalls.
+## Install the Server
 
-## Architecture
+The relay server runs on a public VPS. It accepts CLI client connections and routes public HTTP traffic to the correct tunnel.
 
-Ratatosk is a Go monorepo with three components:
-
-- **Relay Server** (`cmd/server`) — Runs on a public VPS. Listens for CLI client connections over a multiplexed TCP channel and routes incoming public traffic to the correct tunnel via generated subdomains.
-- **CLI Client** (`cmd/cli`) — Runs on your local machine. Establishes a persistent, multiplexed TCP connection to the Relay Server using [yamux](https://github.com/hashicorp/yamux) and forwards tunneled requests to a local port.
-- **Dashboard** (`cmd/server/dashboard`) — A React + Vite SPA embedded into the server binary via `go:embed`. Monitors active tunnels, bandwidth, and real-time traffic.
-
-## Project Structure
-
-```
-ratatosk/
-├── cmd/
-│   ├── server/            # Relay server entry point
-│   │   └── dashboard/     # React + Vite frontend
-│   └── cli/               # CLI client entry point
-├── internal/
-│   ├── config/            # Configuration manager (viper)
-│   ├── inspector/         # Traffic monitoring and logging
-│   ├── tunnel/            # TCP multiplexing (yamux)
-│   └── protocol/          # Message formats for server-client communication
-├── deploy/                # Systemd, Docker, and example config
-├── Makefile
-├── go.mod
-└── go.sum
-```
-
-## Prerequisites
-
-- [Go](https://go.dev/) 1.26+
-- [Node.js](https://nodejs.org/) 20+ and [pnpm](https://pnpm.io/) (for the dashboard)
-
-## Quick Start (Local Development)
-
-### 1. Start the Relay Server
+### Docker (recommended)
 
 ```sh
-make dev-server
-```
-
-The server starts with default settings — no config file needed:
-- `:7000` TCP control plane (client connections)
-- `:8080` public HTTP proxy
-- `:8081` admin dashboard
-
-### 2. Connect the CLI Client
-
-In a separate terminal:
-
-```sh
-make dev-cli
-```
-
-The client connects to `localhost:7000`, establishes a yamux session, and receives a tunnel URL like `http://quick-fox-1234.localhost:8080`.
-
-### 3. Start the Dashboard (development)
-
-```sh
-make dev-dashboard
-```
-
-Opens the Vite dev server with hot-reload, proxying API calls to the admin server.
-
-## Installation
-
-### From Source
-
-```sh
-git clone https://github.com/reinier-hernandez/ratatosk.git
-cd ratatosk
-make build
-```
-
-This builds both binaries into `bin/`:
-- `bin/server` — the relay server (with embedded dashboard)
-- `bin/cli` — the tunnel client
-
-### Docker
-
-```sh
-docker build -f deploy/Dockerfile.server -t ratatosk-server .
-docker run -p 7000:7000 -p 8080:8080 -p 8081:8081 ratatosk-server
+docker run -d --name ratatosk \
+  -p 7000:7000 -p 8080:8080 -p 8081:8081 \
+  ghcr.io/reinier-hernandez/ratatosk-server
 ```
 
 To pass a config file:
 
 ```sh
-docker run \
+docker run -d --name ratatosk \
   -v /path/to/ratatosk.yaml:/etc/ratatosk/ratatosk.yaml:ro \
   -p 7000:7000 -p 443:443 -p 8081:8081 \
-  ratatosk-server
+  ghcr.io/reinier-hernandez/ratatosk-server
 ```
 
-## Configuration
+### Build from Source
 
-The relay server reads configuration from a `ratatosk.yaml` file, environment variables, or built-in defaults. No config file is required — the server runs out of the box with sane defaults.
+```sh
+git clone https://github.com/reinier-hernandez/ratatosk.git
+cd ratatosk
+make build
+sudo cp bin/server /usr/local/bin/ratatosk-server
+```
+
+## Configure the Server
+
+The server runs out of the box with sane defaults — no config file required.
+
+| Port | Purpose |
+|------|---------|
+| `7000` | TCP control plane (CLI client connections) |
+| `8080` | Public HTTP(S) proxy |
+| `8081` | Admin dashboard and API |
 
 ### Config File
 
@@ -125,37 +66,25 @@ The server searches for `ratatosk.yaml` in these locations (first match wins):
 2. `$HOME/.ratatosk/ratatosk.yaml`
 3. `./ratatosk.yaml` (current directory)
 
-Copy the example config as a starting point:
+Copy the example as a starting point:
 
 ```sh
-cp deploy/ratatosk.yaml.example ratatosk.yaml
+cp deploy/ratatosk.yaml.example /etc/ratatosk/ratatosk.yaml
 ```
 
-### Full Configuration Reference
-
 ```yaml
-# Base domain for tunnel subdomains.
-# Tunnels are accessible at <subdomain>.<base_domain>.
-base_domain: localhost
-
-# Port for the public HTTP(S) proxy.
-public_port: 8080
-
-# Port for the admin dashboard and API.
-admin_port: 8081
-
-# Port for the TCP control plane (CLI client connections).
-control_port: 7000
-
-# TLS settings (requires a wildcard certificate for *.base_domain).
-tls_enabled: false
-tls_cert_file: ""
-tls_key_file: ""
+base_domain: localhost       # Tunnels are <subdomain>.<base_domain>
+public_port: 8080            # Public HTTP(S) proxy port
+admin_port: 8081             # Admin dashboard port
+control_port: 7000           # TCP control plane port
+tls_enabled: false           # Enable TLS on the public proxy
+tls_cert_file: ""            # Path to TLS certificate (PEM)
+tls_key_file: ""             # Path to TLS private key (PEM)
 ```
 
 ### Environment Variables
 
-Every config option can be set via environment variables with the `RATATOSK_` prefix. Environment variables override config file values.
+Every option can be set via environment variables with the `RATATOSK_` prefix. Environment variables override config file values.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -166,6 +95,38 @@ Every config option can be set via environment variables with the `RATATOSK_` pr
 | `RATATOSK_TLS_ENABLED` | `false` | Enable TLS on the public proxy |
 | `RATATOSK_TLS_CERT_FILE` | | Path to TLS certificate (PEM) |
 | `RATATOSK_TLS_KEY_FILE` | | Path to TLS private key (PEM) |
+
+## Install the CLI
+
+The CLI client runs on your local machine. It opens a persistent, multiplexed connection to the relay server and forwards tunneled requests to a local port.
+
+### Build from Source
+
+```sh
+git clone https://github.com/reinier-hernandez/ratatosk.git
+cd ratatosk
+make build
+sudo cp bin/cli /usr/local/bin/ratatosk
+```
+
+### Usage
+
+Expose a local service running on port 3000:
+
+```sh
+ratatosk --port 3000
+```
+
+The CLI connects to the relay server, establishes a [yamux](https://github.com/hashicorp/yamux) session, and prints the public tunnel URL:
+
+```
+Ratatosk                        (Ctrl+C to quit)
+
+Forwarding      http://quick-fox-1234.tunnel.example.com -> http://localhost:3000
+Web Interface   http://127.0.0.1:4300
+```
+
+The web interface provides a local traffic inspector for monitoring requests and responses flowing through the tunnel.
 
 ## Production Deployment
 
@@ -203,19 +164,15 @@ When TLS is enabled, the server also starts an HTTP listener on port 80 that red
 Install the relay server as a system service:
 
 ```sh
-# Create a dedicated user
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin ratatosk
 
-# Install the binary and config
 sudo cp bin/server /usr/local/bin/ratatosk-server
 sudo mkdir -p /etc/ratatosk /var/log/ratatosk
 sudo cp deploy/ratatosk.yaml.example /etc/ratatosk/ratatosk.yaml
 sudo chown -R ratatosk:ratatosk /etc/ratatosk /var/log/ratatosk
 
-# Edit the config
 sudo editor /etc/ratatosk/ratatosk.yaml
 
-# Install and start the service
 sudo cp deploy/ratatosk.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now ratatosk
@@ -228,14 +185,48 @@ sudo systemctl status ratatosk
 sudo journalctl -u ratatosk -f
 ```
 
-The Systemd unit uses `AmbientCapabilities=CAP_NET_BIND_SERVICE` so the server can bind to ports 80 and 443 without running as root.
+The systemd unit uses `AmbientCapabilities=CAP_NET_BIND_SERVICE` so the server can bind to ports 80 and 443 without running as root.
 
-## Testing
+## Development
+
+### Prerequisites
+
+- [Go](https://go.dev/) 1.26+
+- [Node.js](https://nodejs.org/) 20+ and [pnpm](https://pnpm.io/) (for the dashboard)
+
+### Quick Start
+
+```sh
+make dev-server      # Start the relay server (builds dashboard first)
+make dev-cli         # Connect the CLI client (separate terminal)
+make dev-dashboard   # Vite dev server with hot-reload (separate terminal)
+```
+
+### Testing
 
 ```sh
 make test          # run all tests
 make test-race     # run with the race detector
 make coverage      # generate and display coverage report
+```
+
+### Project Structure
+
+```
+ratatosk/
+├── cmd/
+│   ├── server/            # Relay server entry point
+│   │   └── dashboard/     # React + Vite frontend
+│   └── cli/               # CLI client entry point
+├── internal/
+│   ├── config/            # Configuration manager (viper)
+│   ├── inspector/         # Traffic monitoring and logging
+│   ├── tunnel/            # TCP multiplexing (yamux)
+│   └── protocol/          # Message formats for server-client communication
+├── deploy/                # Systemd, Docker, and example config
+├── Makefile
+├── go.mod
+└── go.sum
 ```
 
 ## How It Works
