@@ -428,26 +428,8 @@ func handleUDPTunnel(session *yamux.Session, controlStream net.Conn, req *protoc
 }
 
 func handleHTTP(w http.ResponseWriter, r *http.Request) {
-	// Extract subdomain from Host header (e.g. "quick-fox-1234.tunnel.example.com:8080").
-	host := r.Host
-	if idx := strings.LastIndex(host, ":"); idx != -1 {
-		host = host[:idx]
-	}
-
-	// Strip the base domain suffix to extract the subdomain.
-	subdomain := extractSubdomain(host, cfg.BaseDomain)
-	if subdomain == "" {
-		http.Error(w, "invalid host", http.StatusBadRequest)
-		return
-	}
-
-	entry, ok := registry.GetEntry(subdomain)
+	subdomain, entry, ok := resolveHTTPTunnel(w, r)
 	if !ok {
-		http.Error(w, "tunnel not found", http.StatusBadGateway)
-		return
-	}
-
-	if !checkBasicAuth(w, r, entry.BasicAuth) {
 		return
 	}
 
@@ -477,27 +459,60 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Read further requests from the hijacked connection (keep-alive).
-	reader := clientBuf.Reader
+	handleKeepAliveRequests(clientBuf.Reader, rawConn)
+}
+
+// resolveHTTPTunnel extracts the subdomain from the request's Host header,
+// looks up the tunnel in the registry, and validates basic auth. It writes
+// an appropriate HTTP error and returns ok=false if any step fails.
+func resolveHTTPTunnel(w http.ResponseWriter, r *http.Request) (subdomain string, entry *tunnel.TunnelEntry, ok bool) {
+	host := r.Host
+	if idx := strings.LastIndex(host, ":"); idx != -1 {
+		host = host[:idx]
+	}
+
+	subdomain = extractSubdomain(host, cfg.BaseDomain)
+	if subdomain == "" {
+		http.Error(w, "invalid host", http.StatusBadRequest)
+		return "", nil, false
+	}
+
+	entry, found := registry.GetEntry(subdomain)
+	if !found {
+		http.Error(w, "tunnel not found", http.StatusBadGateway)
+		return "", nil, false
+	}
+
+	if !checkBasicAuth(w, r, entry.BasicAuth) {
+		return "", nil, false
+	}
+
+	return subdomain, entry, true
+}
+
+// handleKeepAliveRequests reads subsequent HTTP requests from a hijacked
+// keep-alive connection and proxies each one through the tunnel.
+func handleKeepAliveRequests(reader *bufio.Reader, rawConn net.Conn) {
 	for {
 		req, err := http.ReadRequest(reader)
 		if err != nil {
 			return // client closed connection or malformed request
 		}
-		// Re-extract subdomain — the Host header could theoretically differ,
-		// but in practice it stays the same on a keep-alive connection.
-		h := req.Host
-		if idx := strings.LastIndex(h, ":"); idx != -1 {
-			h = h[:idx]
+
+		host := req.Host
+		if idx := strings.LastIndex(host, ":"); idx != -1 {
+			host = host[:idx]
 		}
-		sub := extractSubdomain(h, cfg.BaseDomain)
+		sub := extractSubdomain(host, cfg.BaseDomain)
 		if sub == "" {
 			return
 		}
+
 		ent, ok := registry.GetEntry(sub)
 		if !ok {
 			return
 		}
+
 		if ent.BasicAuth != "" {
 			user, pass, ok := req.BasicAuth()
 			if !ok || user+":"+pass != ent.BasicAuth {
@@ -505,6 +520,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
+
 		if !proxyRequest(req, sub, ent.Session, rawConn) {
 			return
 		}

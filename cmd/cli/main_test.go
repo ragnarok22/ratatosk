@@ -105,6 +105,49 @@ func TestMainVersionCommand(t *testing.T) {
 	}
 }
 
+func TestMainExitsOnRunError(t *testing.T) {
+	oldArgs := cliArgs
+	oldGetenv := cliGetenv
+	oldStdout := cliStdout
+	oldStderr := cliStderr
+	oldExit := cliExit
+	oldUpdateCLI := cliUpdateCLI
+	oldRunClient := cliRunClient
+	oldRunRawClient := cliRunRawClient
+	t.Cleanup(func() {
+		cliArgs = oldArgs
+		cliGetenv = oldGetenv
+		cliStdout = oldStdout
+		cliStderr = oldStderr
+		cliExit = oldExit
+		cliUpdateCLI = oldUpdateCLI
+		cliRunClient = oldRunClient
+		cliRunRawClient = oldRunRawClient
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := -1
+
+	cliArgs = func() []string { return []string{"ratatosk", "-basic-auth", "invalid"} }
+	cliGetenv = func(string) string { return "" }
+	cliStdout = &stdout
+	cliStderr = &stderr
+	cliUpdateCLI = func(string) error { return nil }
+	cliRunClient = func(string, int, string) error { return nil }
+	cliRunRawClient = func(string, int, string) error { return nil }
+	cliExit = func(code int) { exitCode = code }
+
+	main()
+
+	if exitCode != 1 {
+		t.Fatalf("exitCode = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stderr.String(), "--basic-auth must be in 'user:pass' format") {
+		t.Fatalf("stderr = %q, want validation error", stderr.String())
+	}
+}
+
 func TestRunSelfUpdateCommand(t *testing.T) {
 	oldLogger := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(oldLogger) })
@@ -334,6 +377,32 @@ func TestRunRejectsInvalidBasicAuth(t *testing.T) {
 	}
 	if got := stderr.String(); !strings.Contains(got, "--basic-auth must be in 'user:pass' format") {
 		t.Fatalf("stderr = %q, want basic auth validation message", got)
+	}
+}
+
+func TestRunFlagParseError(t *testing.T) {
+	oldLogger := slog.Default()
+	oldRedact := redact.Enabled
+	t.Cleanup(func() {
+		slog.SetDefault(oldLogger)
+		redact.Enabled = oldRedact
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := run(
+		[]string{"ratatosk", "-unknown"},
+		func(string) string { return "" },
+		&stdout,
+		&stderr,
+		func(string) error { return nil },
+		func(string, int, string) error { return nil },
+		noopRawClient,
+	)
+
+	if code != 2 {
+		t.Fatalf("code = %d, want 2", code)
 	}
 }
 
@@ -585,6 +654,69 @@ func TestRunClientWithBasicAuth(t *testing.T) {
 	}
 }
 
+func TestRunClientUsesFallbackURLWhenResponseURLMissing(t *testing.T) {
+	oldStartInspector := cliStartInspector
+	oldStdout := os.Stdout
+	t.Cleanup(func() {
+		cliStartInspector = oldStartInspector
+		os.Stdout = oldStdout
+	})
+
+	cliStartInspector = func(*inspector.Logger) (string, error) {
+		return "", errors.New("inspector unavailable")
+	}
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer r.Close()
+	os.Stdout = w
+
+	addr := startMockRelay(t, func(conn net.Conn) {
+		defer conn.Close()
+		session, err := tunnel.NewServerSession(conn)
+		if err != nil {
+			return
+		}
+		defer session.Close()
+
+		cs, err := session.Accept()
+		if err != nil {
+			return
+		}
+		if _, err := protocol.ReadRequest(cs); err != nil {
+			cs.Close()
+			return
+		}
+		protocol.WriteResponse(cs, &protocol.TunnelResponse{
+			Success:   true,
+			Subdomain: "fallback-url",
+		})
+		cs.Close()
+
+		time.Sleep(100 * time.Millisecond)
+	})
+
+	if err := runClient(addr, 13004, ""); err != nil {
+		t.Fatalf("runClient: %v", err)
+	}
+
+	w.Close()
+	output, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+
+	got := string(output)
+	if !strings.Contains(got, "http://fallback-url.localhost:8080") {
+		t.Fatalf("stdout = %q, want fallback tunnel URL", got)
+	}
+	if strings.Contains(got, "Web Interface") {
+		t.Fatalf("stdout = %q, want inspector banner omitted when start fails", got)
+	}
+}
+
 func TestHandleStream(t *testing.T) {
 	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
@@ -789,6 +921,28 @@ func TestRunTCPCommandInvalidPort(t *testing.T) {
 	}
 }
 
+func TestRunTCPCommandFlagParseError(t *testing.T) {
+	oldLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := run(
+		[]string{"ratatosk", "tcp", "--unknown"},
+		func(string) string { return "" },
+		&stdout,
+		&stderr,
+		func(string) error { return nil },
+		func(string, int, string) error { return nil },
+		noopRawClient,
+	)
+
+	if code != 2 {
+		t.Fatalf("code = %d, want 2", code)
+	}
+}
+
 func TestRunTCPCommandEnvOverride(t *testing.T) {
 	oldLogger := slog.Default()
 	t.Cleanup(func() { slog.SetDefault(oldLogger) })
@@ -924,6 +1078,148 @@ func TestRunRawClientConnectionRefused(t *testing.T) {
 	}
 }
 
+func TestRunRawClientReadResponseError(t *testing.T) {
+	addr := startMockRelay(t, func(conn net.Conn) {
+		defer conn.Close()
+		session, err := tunnel.NewServerSession(conn)
+		if err != nil {
+			return
+		}
+		defer session.Close()
+
+		cs, err := session.Accept()
+		if err != nil {
+			return
+		}
+		protocol.ReadRequest(cs)
+		cs.Close()
+	})
+
+	if err := runRawClient(addr, 22, protocol.ProtoTCP); err == nil {
+		t.Fatal("expected response read error")
+	}
+}
+
+func TestRunRawClientAbruptDisconnect(t *testing.T) {
+	addr := startMockRelay(t, func(conn net.Conn) {
+		session, err := tunnel.NewServerSession(conn)
+		if err != nil {
+			conn.Close()
+			return
+		}
+
+		cs, err := session.Accept()
+		if err != nil {
+			conn.Close()
+			return
+		}
+		protocol.ReadRequest(cs)
+		protocol.WriteResponse(cs, &protocol.TunnelResponse{Success: true, Port: 12345})
+		cs.Close()
+
+		time.Sleep(100 * time.Millisecond)
+		conn.Close()
+	})
+
+	if err := runRawClient(addr, 22, protocol.ProtoTCP); err != nil {
+		t.Fatalf("runRawClient: %v", err)
+	}
+}
+
+func TestRunRawClientUDPPath(t *testing.T) {
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer udpConn.Close()
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+
+		buf := make([]byte, tunnel.MaxUDPFrameSize)
+		n, addr, err := udpConn.ReadFromUDP(buf)
+		if err != nil {
+			return
+		}
+		if string(buf[:n]) != "ping" {
+			t.Errorf("got %q, want %q", string(buf[:n]), "ping")
+			return
+		}
+		if _, err := udpConn.WriteToUDP([]byte("pong"), addr); err != nil {
+			t.Errorf("WriteToUDP: %v", err)
+		}
+	}()
+
+	_, portStr, err := net.SplitHostPort(udpConn.LocalAddr().String())
+	if err != nil {
+		t.Fatalf("SplitHostPort: %v", err)
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil {
+		t.Fatalf("Atoi: %v", err)
+	}
+
+	addr := startMockRelay(t, func(conn net.Conn) {
+		defer conn.Close()
+		session, err := tunnel.NewServerSession(conn)
+		if err != nil {
+			return
+		}
+		defer session.Close()
+
+		cs, err := session.Accept()
+		if err != nil {
+			return
+		}
+		req, err := protocol.ReadRequest(cs)
+		if err != nil {
+			cs.Close()
+			return
+		}
+		if req.Protocol != protocol.ProtoUDP {
+			t.Errorf("protocol = %q, want %q", req.Protocol, protocol.ProtoUDP)
+			cs.Close()
+			return
+		}
+		protocol.WriteResponse(cs, &protocol.TunnelResponse{Success: true, Port: 23456})
+		cs.Close()
+
+		time.Sleep(100 * time.Millisecond)
+
+		stream, err := session.Open()
+		if err != nil {
+			return
+		}
+		defer stream.Close()
+
+		if err := tunnel.WriteFrame(stream, []byte("ping")); err != nil {
+			t.Errorf("WriteFrame: %v", err)
+			return
+		}
+		frame, err := tunnel.ReadFrame(stream)
+		if err != nil {
+			t.Errorf("ReadFrame: %v", err)
+			return
+		}
+		if string(frame) != "pong" {
+			t.Errorf("got %q, want %q", string(frame), "pong")
+		}
+
+		time.Sleep(100 * time.Millisecond)
+	})
+
+	if err := runRawClient(addr, port, protocol.ProtoUDP); err != nil {
+		t.Fatalf("runRawClient: %v", err)
+	}
+
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("local UDP server did not finish")
+	}
+}
+
 func TestHandleTCPStream(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -987,6 +1283,30 @@ func TestHandleTCPStream(t *testing.T) {
 	case <-localDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("local TCP server did not finish")
+	}
+}
+
+func TestHandleTCPStreamDialError(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	addr := ln.Addr().String()
+	ln.Close()
+
+	clientStream, serverStream := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		handleTCPStream(serverStream, addr)
+		close(done)
+	}()
+
+	clientStream.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleTCPStream did not return on dial failure")
 	}
 }
 
@@ -1054,5 +1374,53 @@ func TestHandleUDPStream(t *testing.T) {
 	case <-serverDone:
 	case <-time.After(2 * time.Second):
 		t.Fatal("local UDP server did not finish")
+	}
+}
+
+func TestHandleUDPStreamResolveError(t *testing.T) {
+	clientStream, serverStream := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		handleUDPStream(serverStream, "bad udp addr")
+		close(done)
+	}()
+
+	clientStream.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleUDPStream did not return on resolve failure")
+	}
+}
+
+func TestHandleUDPStreamDialError(t *testing.T) {
+	oldResolveUDPAddr := cliResolveUDPAddr
+	oldDialUDP := cliDialUDP
+	t.Cleanup(func() {
+		cliResolveUDPAddr = oldResolveUDPAddr
+		cliDialUDP = oldDialUDP
+	})
+
+	cliResolveUDPAddr = func(network, address string) (*net.UDPAddr, error) {
+		return &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 9999}, nil
+	}
+	cliDialUDP = func(network string, laddr, raddr *net.UDPAddr) (*net.UDPConn, error) {
+		return nil, errors.New("dial failed")
+	}
+
+	clientStream, serverStream := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		handleUDPStream(serverStream, "127.0.0.1:9999")
+		close(done)
+	}()
+
+	clientStream.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleUDPStream did not return on dial failure")
 	}
 }

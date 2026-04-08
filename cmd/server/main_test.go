@@ -2046,6 +2046,330 @@ func TestHandleConnectionUnsupportedProtocol(t *testing.T) {
 	}
 }
 
+func TestHandleHTTPTunnelUniqueSubdomainFailure(t *testing.T) {
+	oldRegistry := registry
+	oldGenerateSubdomain := serverGenerateSubdomain
+	registry = tunnel.NewRegistry()
+	serverGenerateSubdomain = func() string { return "taken" }
+	t.Cleanup(func() {
+		registry = oldRegistry
+		serverGenerateSubdomain = oldGenerateSubdomain
+	})
+
+	registry.Register("taken", nil, "")
+
+	clientConn, serverConn := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleHTTPTunnel(nil, serverConn, &protocol.TunnelRequest{}, "remote")
+	}()
+
+	resp, err := protocol.ReadResponse(clientConn)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	clientConn.Close()
+
+	if resp.Success {
+		t.Fatal("expected subdomain generation failure")
+	}
+	if !strings.Contains(resp.Error, "failed to generate unique subdomain") {
+		t.Fatalf("error = %q, want unique subdomain failure", resp.Error)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleHTTPTunnel did not return")
+	}
+}
+
+func TestHandleHTTPTunnelWriteResponseErrorUnregistersTunnel(t *testing.T) {
+	oldRegistry := registry
+	oldGenerateSubdomain := serverGenerateSubdomain
+	registry = tunnel.NewRegistry()
+	serverGenerateSubdomain = func() string { return "write-fail" }
+	t.Cleanup(func() {
+		registry = oldRegistry
+		serverGenerateSubdomain = oldGenerateSubdomain
+	})
+
+	clientConn, serverConn := net.Pipe()
+	clientConn.Close()
+
+	handleHTTPTunnel(nil, serverConn, &protocol.TunnelRequest{BasicAuth: "admin:secret"}, "remote")
+
+	if registry.HasSubdomain("write-fail") {
+		t.Fatal("tunnel remained registered after response write failure")
+	}
+}
+
+func TestHandleTCPTunnelAllocationFailure(t *testing.T) {
+	oldAlloc := portAlloc
+	portAlloc = tunnel.NewPortAllocator(35010, 35010)
+	if _, err := portAlloc.Allocate(); err != nil {
+		t.Fatalf("Allocate: %v", err)
+	}
+	t.Cleanup(func() { portAlloc = oldAlloc })
+
+	clientConn, serverConn := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleTCPTunnel(nil, serverConn, &protocol.TunnelRequest{LocalPort: 22}, "remote")
+	}()
+
+	resp, err := protocol.ReadResponse(clientConn)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	clientConn.Close()
+
+	if resp.Success {
+		t.Fatal("expected allocation failure")
+	}
+	if !strings.Contains(resp.Error, "port allocation failed") {
+		t.Fatalf("error = %q, want allocation failure", resp.Error)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleTCPTunnel did not return")
+	}
+}
+
+func TestHandleTCPTunnelListenFailure(t *testing.T) {
+	oldAlloc := portAlloc
+	oldListenTCP := serverListenTCP
+	portAlloc = tunnel.NewPortAllocator(35011, 35011)
+	serverListenTCP = net.Listen
+	t.Cleanup(func() {
+		portAlloc = oldAlloc
+		serverListenTCP = oldListenTCP
+	})
+
+	busy, err := net.Listen("tcp", ":35011")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer busy.Close()
+
+	clientConn, serverConn := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleTCPTunnel(nil, serverConn, &protocol.TunnelRequest{LocalPort: 22}, "remote")
+	}()
+
+	resp, err := protocol.ReadResponse(clientConn)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	clientConn.Close()
+
+	if resp.Success {
+		t.Fatal("expected listen failure")
+	}
+	if !strings.Contains(resp.Error, "failed to listen on port 35011") {
+		t.Fatalf("error = %q, want listen failure", resp.Error)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleTCPTunnel did not return")
+	}
+}
+
+func TestHandleTCPTunnelWriteResponseErrorClosesListener(t *testing.T) {
+	oldAlloc := portAlloc
+	oldRegistry := registry
+	oldListenTCP := serverListenTCP
+	portAlloc = tunnel.NewPortAllocator(35012, 35012)
+	registry = tunnel.NewRegistry()
+	serverListenTCP = net.Listen
+	t.Cleanup(func() {
+		portAlloc = oldAlloc
+		registry = oldRegistry
+		serverListenTCP = oldListenTCP
+	})
+
+	clientConn, serverConn := net.Pipe()
+	clientConn.Close()
+
+	handleTCPTunnel(nil, serverConn, &protocol.TunnelRequest{LocalPort: 22}, "remote")
+
+	if _, ok := registry.GetPortEntry(35012); ok {
+		t.Fatal("port remained registered after response write failure")
+	}
+	if got, err := portAlloc.Allocate(); err != nil || got != 35012 {
+		t.Fatalf("Allocate() = (%d, %v), want (35012, nil)", got, err)
+	}
+
+	ln, err := net.Listen("tcp", ":35012")
+	if err != nil {
+		t.Fatalf("listener was not closed: %v", err)
+	}
+	ln.Close()
+}
+
+func TestHandleUDPTunnelAllocationFailure(t *testing.T) {
+	oldAlloc := portAlloc
+	portAlloc = tunnel.NewPortAllocator(35020, 35020)
+	if _, err := portAlloc.Allocate(); err != nil {
+		t.Fatalf("Allocate: %v", err)
+	}
+	t.Cleanup(func() { portAlloc = oldAlloc })
+
+	clientConn, serverConn := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleUDPTunnel(nil, serverConn, &protocol.TunnelRequest{LocalPort: 25565}, "remote")
+	}()
+
+	resp, err := protocol.ReadResponse(clientConn)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	clientConn.Close()
+
+	if resp.Success {
+		t.Fatal("expected allocation failure")
+	}
+	if !strings.Contains(resp.Error, "port allocation failed") {
+		t.Fatalf("error = %q, want allocation failure", resp.Error)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleUDPTunnel did not return")
+	}
+}
+
+func TestHandleUDPTunnelResolveFailure(t *testing.T) {
+	oldAlloc := portAlloc
+	oldResolveUDPAddr := serverResolveUDPAddr
+	portAlloc = tunnel.NewPortAllocator(35021, 35021)
+	serverResolveUDPAddr = func(network, address string) (*net.UDPAddr, error) {
+		return nil, errors.New("resolve failed")
+	}
+	t.Cleanup(func() {
+		portAlloc = oldAlloc
+		serverResolveUDPAddr = oldResolveUDPAddr
+	})
+
+	clientConn, serverConn := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleUDPTunnel(nil, serverConn, &protocol.TunnelRequest{LocalPort: 25565}, "remote")
+	}()
+
+	resp, err := protocol.ReadResponse(clientConn)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	clientConn.Close()
+
+	if resp.Success {
+		t.Fatal("expected resolve failure")
+	}
+	if !strings.Contains(resp.Error, "failed to resolve UDP address") {
+		t.Fatalf("error = %q, want resolve failure", resp.Error)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleUDPTunnel did not return")
+	}
+}
+
+func TestHandleUDPTunnelListenFailure(t *testing.T) {
+	oldAlloc := portAlloc
+	oldResolveUDPAddr := serverResolveUDPAddr
+	oldListenUDP := serverListenUDP
+	portAlloc = tunnel.NewPortAllocator(35022, 35022)
+	serverResolveUDPAddr = net.ResolveUDPAddr
+	serverListenUDP = net.ListenUDP
+	t.Cleanup(func() {
+		portAlloc = oldAlloc
+		serverResolveUDPAddr = oldResolveUDPAddr
+		serverListenUDP = oldListenUDP
+	})
+
+	busy, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 35022})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer busy.Close()
+
+	clientConn, serverConn := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleUDPTunnel(nil, serverConn, &protocol.TunnelRequest{LocalPort: 25565}, "remote")
+	}()
+
+	resp, err := protocol.ReadResponse(clientConn)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	clientConn.Close()
+
+	if resp.Success {
+		t.Fatal("expected listen failure")
+	}
+	if !strings.Contains(resp.Error, "failed to listen on UDP port 35022") {
+		t.Fatalf("error = %q, want listen failure", resp.Error)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleUDPTunnel did not return")
+	}
+}
+
+func TestHandleUDPTunnelWriteResponseErrorClosesSocket(t *testing.T) {
+	oldAlloc := portAlloc
+	oldRegistry := registry
+	oldResolveUDPAddr := serverResolveUDPAddr
+	oldListenUDP := serverListenUDP
+	portAlloc = tunnel.NewPortAllocator(35023, 35023)
+	registry = tunnel.NewRegistry()
+	serverResolveUDPAddr = net.ResolveUDPAddr
+	serverListenUDP = net.ListenUDP
+	t.Cleanup(func() {
+		portAlloc = oldAlloc
+		registry = oldRegistry
+		serverResolveUDPAddr = oldResolveUDPAddr
+		serverListenUDP = oldListenUDP
+	})
+
+	clientConn, serverConn := net.Pipe()
+	clientConn.Close()
+
+	handleUDPTunnel(nil, serverConn, &protocol.TunnelRequest{LocalPort: 25565}, "remote")
+
+	if _, ok := registry.GetPortEntry(35023); ok {
+		t.Fatal("port remained registered after response write failure")
+	}
+	if got, err := portAlloc.Allocate(); err != nil || got != 35023 {
+		t.Fatalf("Allocate() = (%d, %v), want (35023, nil)", got, err)
+	}
+
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 35023})
+	if err != nil {
+		t.Fatalf("UDP socket was not closed: %v", err)
+	}
+	udpConn.Close()
+}
+
 func TestHTTPProxyBasicAuthWrongCredentials(t *testing.T) {
 	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "should not reach")
