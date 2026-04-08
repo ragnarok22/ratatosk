@@ -8,7 +8,7 @@
 # Ratatosk: Project Context & Agent Guidelines
 
 ## 🎯 Project Overview
-**Ratatosk** is an open-source, self-hosted reverse proxy and tunneling tool, designed as a free alternative to ngrok. It allows users to expose local web servers, TCP services, and UDP endpoints to the internet securely, bypassing NAT and local firewalls. 
+**Ratatosk** is an open-source, self-hosted reverse proxy and tunneling tool. It allows users to expose local web servers, TCP services, and UDP endpoints to the internet securely, bypassing NAT and local firewalls. 
 
 The project is built as a **Go Monorepo** containing three main logical components:
 1. **The Relay Server (`frps` equivalent):** Runs on a public VPS, listens for incoming public traffic, and routes it to the correct connected local client. HTTP tunnels are routed by subdomain; TCP/UDP tunnels use dynamically allocated ports from a configurable range.

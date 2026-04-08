@@ -1,10 +1,10 @@
 # Introduction
 
-Ratatosk is an open-source, self-hosted reverse proxy and tunneling tool. It lets you expose local web servers, TCP services, and UDP endpoints to the internet securely, bypassing NAT and local firewalls -- a free alternative to [ngrok](https://ngrok.com).
+Ratatosk is an open-source, self-hosted reverse proxy and tunneling tool. It lets you expose local web servers, TCP services, and UDP endpoints to the internet securely, bypassing NAT and local firewalls.
 
 ## Why Ratatosk?
 
-If you've ever needed to share a local development server with a colleague, demo a project to a client, or test webhooks against a service running on `localhost`, you've probably reached for ngrok. Ratatosk gives you the same capability without depending on a third-party service:
+If you've ever needed to share a local development server with a colleague, demo a project to a client, or test webhooks against a service running on `localhost`, you know the pain of NAT and firewalls. Ratatosk gives you a tunnel to the public internet without depending on a third-party service:
 
 - **No usage limits** -- tunnel as much traffic as your VPS can handle.
 - **No account required** -- install and run immediately.

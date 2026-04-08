@@ -3,7 +3,7 @@ layout: home
 
 hero:
   name: Ratatosk
-  text: Self-hosted ngrok alternative
+  text: Self-hosted tunneling tool
   tagline: Expose local servers to the internet -- HTTP, TCP, and UDP. Open-source, fast, and yours to control.
   image:
     src: /ratatosk-logo.png
