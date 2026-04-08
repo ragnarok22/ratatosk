@@ -109,7 +109,23 @@ brew install ratatosk
 
 ### Download a Binary
 
-Grab the latest release for your platform from the [Releases](https://github.com/ragnarok22/ratatosk/releases) page.
+Grab the latest release for your platform from the [Releases](https://github.com/ragnarok22/ratatosk/releases) page, or use the commands below:
+
+```sh
+# macOS (Apple Silicon)
+curl -Lo ratatosk https://github.com/ragnarok22/ratatosk/releases/latest/download/ratatosk-cli-darwin-arm64
+chmod +x ratatosk && sudo mv ratatosk /usr/local/bin/
+
+# macOS (Intel)
+curl -Lo ratatosk https://github.com/ragnarok22/ratatosk/releases/latest/download/ratatosk-cli-darwin-amd64
+chmod +x ratatosk && sudo mv ratatosk /usr/local/bin/
+
+# Linux (amd64)
+curl -Lo ratatosk https://github.com/ragnarok22/ratatosk/releases/latest/download/ratatosk-cli-linux-amd64
+chmod +x ratatosk && sudo mv ratatosk /usr/local/bin/
+```
+
+On Windows, download `ratatosk-cli-windows-amd64.exe` from the Releases page.
 
 ### Build from Source
 
@@ -119,6 +135,14 @@ cd ratatosk
 make build
 sudo cp bin/cli /usr/local/bin/ratatosk
 ```
+
+### Commands
+
+| Command | Description |
+|---------|-------------|
+| `ratatosk --port <port>` | Expose a local service (default: 3000) |
+| `ratatosk version` | Print the CLI version |
+| `ratatosk self-update` | Check for updates and self-update (defers to `brew upgrade` if installed via Homebrew) |
 
 ### Usage
 

@@ -11,9 +11,26 @@ import (
 	"ratatosk/internal/inspector"
 	"ratatosk/internal/protocol"
 	"ratatosk/internal/tunnel"
+	"ratatosk/internal/updater"
 )
 
+var Version = "dev"
+
 func main() {
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "version":
+			fmt.Printf("Ratatosk CLI version: %s\n", Version)
+			return
+		case "self-update":
+			if err := updater.UpdateCLI(Version); err != nil {
+				slog.Error("update failed", "error", err)
+				os.Exit(1)
+			}
+			return
+		}
+	}
+
 	port := flag.Int("port", 3000, "local port to expose")
 	flag.Parse()
 	localAddr := fmt.Sprintf("localhost:%d", *port)
