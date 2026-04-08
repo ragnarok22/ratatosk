@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -71,6 +72,36 @@ func TestRunVersionCommand(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestMainVersionCommand(t *testing.T) {
+	oldArgs := os.Args
+	oldStdout := os.Stdout
+	t.Cleanup(func() {
+		os.Args = oldArgs
+		os.Stdout = oldStdout
+	})
+
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe: %v", err)
+	}
+	defer r.Close()
+
+	os.Args = []string{"ratatosk", "version"}
+	os.Stdout = w
+
+	main()
+
+	w.Close()
+	output, err := io.ReadAll(r)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+
+	if !strings.Contains(string(output), "Ratatosk CLI version:") {
+		t.Fatalf("stdout = %q, want version output", string(output))
 	}
 }
 
@@ -845,5 +876,138 @@ func TestRunRawClientConnectionRefused(t *testing.T) {
 
 	if err := runRawClient(addr, 22, protocol.ProtoTCP); err == nil {
 		t.Fatal("expected connection error")
+	}
+}
+
+func TestHandleTCPStream(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+
+	localDone := make(chan struct{})
+	go func() {
+		defer close(localDone)
+
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+
+		buf := make([]byte, 4)
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			t.Errorf("ReadFull: %v", err)
+			return
+		}
+		if string(buf) != "ping" {
+			t.Errorf("got %q, want %q", string(buf), "ping")
+			return
+		}
+
+		if _, err := conn.Write([]byte("pong")); err != nil {
+			t.Errorf("Write: %v", err)
+		}
+	}()
+
+	clientStream, serverStream := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		handleTCPStream(serverStream, ln.Addr().String())
+		close(done)
+	}()
+
+	if _, err := clientStream.Write([]byte("ping")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	buf := make([]byte, 4)
+	if _, err := io.ReadFull(clientStream, buf); err != nil {
+		t.Fatalf("ReadFull: %v", err)
+	}
+	if string(buf) != "pong" {
+		t.Fatalf("got %q, want %q", string(buf), "pong")
+	}
+
+	clientStream.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleTCPStream did not return")
+	}
+
+	select {
+	case <-localDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("local TCP server did not finish")
+	}
+}
+
+func TestHandleUDPStream(t *testing.T) {
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer udpConn.Close()
+
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+
+		buf := make([]byte, tunnel.MaxUDPFrameSize)
+		n, addr, err := udpConn.ReadFromUDP(buf)
+		if err != nil {
+			t.Errorf("ReadFromUDP: %v", err)
+			return
+		}
+		if string(buf[:n]) != "ping" {
+			t.Errorf("got %q, want %q", string(buf[:n]), "ping")
+			return
+		}
+
+		if _, err := udpConn.WriteToUDP([]byte("pong"), addr); err != nil {
+			t.Errorf("WriteToUDP pong: %v", err)
+			return
+		}
+
+		time.Sleep(50 * time.Millisecond)
+		if _, err := udpConn.WriteToUDP([]byte("late"), addr); err != nil {
+			t.Errorf("WriteToUDP late: %v", err)
+		}
+	}()
+
+	clientStream, serverStream := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		handleUDPStream(serverStream, udpConn.LocalAddr().String())
+		close(done)
+	}()
+
+	if err := tunnel.WriteFrame(clientStream, []byte("ping")); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+
+	frame, err := tunnel.ReadFrame(clientStream)
+	if err != nil {
+		t.Fatalf("ReadFrame: %v", err)
+	}
+	if string(frame) != "pong" {
+		t.Fatalf("got %q, want %q", string(frame), "pong")
+	}
+
+	clientStream.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleUDPStream did not return")
+	}
+
+	select {
+	case <-serverDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("local UDP server did not finish")
 	}
 }

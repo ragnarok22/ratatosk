@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -112,6 +113,55 @@ func TestLoadServerConfig(t *testing.T) {
 
 	if cfg != want {
 		t.Fatalf("cfg = %#v, want %#v", cfg, want)
+	}
+}
+
+func TestMainExitsOnLoadConfigError(t *testing.T) {
+	oldStdout := mainStdout
+	oldExit := mainExit
+	oldLoadConfig := mainLoadConfig
+	oldListen := mainListen
+	oldServe := mainListenAndServe
+	oldServeTLS := mainListenAndServeTLS
+	t.Cleanup(func() {
+		mainStdout = oldStdout
+		mainExit = oldExit
+		mainLoadConfig = oldLoadConfig
+		mainListen = oldListen
+		mainListenAndServe = oldServe
+		mainListenAndServeTLS = oldServeTLS
+	})
+
+	var stdout bytes.Buffer
+	exitCode := -1
+
+	mainStdout = &stdout
+	mainLoadConfig = func() (*config.ServerConfig, error) {
+		return nil, errors.New("boom")
+	}
+	mainListen = func(network, address string) (net.Listener, error) {
+		t.Fatal("mainListen should not be called")
+		return nil, nil
+	}
+	mainListenAndServe = func(addr string, handler http.Handler) error {
+		t.Fatal("mainListenAndServe should not be called")
+		return nil
+	}
+	mainListenAndServeTLS = func(addr, certFile, keyFile string, handler http.Handler) error {
+		t.Fatal("mainListenAndServeTLS should not be called")
+		return nil
+	}
+	mainExit = func(code int) {
+		exitCode = code
+	}
+
+	main()
+
+	if exitCode != 1 {
+		t.Fatalf("exitCode = %d, want 1", exitCode)
+	}
+	if !strings.Contains(stdout.String(), "failed to load config") {
+		t.Fatalf("stdout = %q, want load config error", stdout.String())
 	}
 }
 
