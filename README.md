@@ -7,6 +7,8 @@
 <p align="center">
 
 ![Status: Alpha](https://img.shields.io/badge/status-alpha-orange)
+[![CI](https://github.com/ragnarok22/ratatosk/actions/workflows/ci.yml/badge.svg)](https://github.com/ragnarok22/ratatosk/actions/workflows/ci.yml)
+[![Release](https://github.com/ragnarok22/ratatosk/actions/workflows/release.yml/badge.svg)](https://github.com/ragnarok22/ratatosk/actions/workflows/release.yml)
 [![Go Version](https://img.shields.io/badge/go-1.26.1%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![Node.js Version](https://img.shields.io/badge/node-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![License: GPLv3](https://img.shields.io/badge/license-GPLv3-blue.svg)](./LICENSE)
