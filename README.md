@@ -8,9 +8,11 @@
 
 ![Status: Alpha](https://img.shields.io/badge/status-alpha-orange)
 [![CI](https://github.com/ragnarok22/ratatosk/actions/workflows/ci.yml/badge.svg)](https://github.com/ragnarok22/ratatosk/actions/workflows/ci.yml)
+[![codecov](https://codecov.io/gh/ragnarok22/ratatosk/branch/main/graph/badge.svg)](https://codecov.io/gh/ragnarok22/ratatosk)
 [![Release](https://github.com/ragnarok22/ratatosk/actions/workflows/release.yml/badge.svg)](https://github.com/ragnarok22/ratatosk/actions/workflows/release.yml)
 [![Go Version](https://img.shields.io/badge/go-1.26.1%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
 [![Node.js Version](https://img.shields.io/badge/node-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![GitHub Release](https://img.shields.io/github/v/release/ragnarok22/ratatosk)](https://github.com/ragnarok22/ratatosk/releases/latest)
 [![License: GPLv3](https://img.shields.io/badge/license-GPLv3-blue.svg)](./LICENSE)
 
 </p>

@@ -35,7 +35,12 @@ jobs:
         run: go vet -tags dev ./...
 
       - name: Test
-        run: go test -tags dev -race ./...
+        run: go test -tags dev -race -coverprofile=coverage.out ./...
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: coverage.out
 
   dashboard:
     name: Dashboard
