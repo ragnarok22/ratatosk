@@ -11,6 +11,7 @@ import (
 type TunnelEntry struct {
 	Session     *yamux.Session
 	ConnectedAt time.Time
+	BasicAuth   string
 }
 
 // TunnelInfo is the exported DTO returned by ListTunnels.
@@ -33,11 +34,12 @@ func NewRegistry() *Registry {
 }
 
 // Register associates a subdomain with a yamux session.
-func (r *Registry) Register(subdomain string, session *yamux.Session) {
+func (r *Registry) Register(subdomain string, session *yamux.Session, basicAuth string) {
 	r.mu.Lock()
 	r.sessions[subdomain] = &TunnelEntry{
 		Session:     session,
 		ConnectedAt: time.Now(),
+		BasicAuth:   basicAuth,
 	}
 	r.mu.Unlock()
 }
@@ -58,6 +60,14 @@ func (r *Registry) GetSession(subdomain string) (*yamux.Session, bool) {
 		return nil, false
 	}
 	return entry.Session, true
+}
+
+// GetEntry returns the full tunnel entry for a subdomain, if it exists.
+func (r *Registry) GetEntry(subdomain string) (*TunnelEntry, bool) {
+	r.mu.RLock()
+	entry, ok := r.sessions[subdomain]
+	r.mu.RUnlock()
+	return entry, ok
 }
 
 // HasSubdomain reports whether a subdomain is already registered.

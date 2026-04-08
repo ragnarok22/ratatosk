@@ -104,6 +104,36 @@ func TestGenerateSubdomainUniqueness(t *testing.T) {
 	}
 }
 
+func TestTunnelRequestWithBasicAuth(t *testing.T) {
+	req := &TunnelRequest{Protocol: "http", LocalPort: 3000, BasicAuth: "admin:secret"}
+
+	var buf bytes.Buffer
+	if err := WriteRequest(&buf, req); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+
+	got, err := ReadRequest(&buf)
+	if err != nil {
+		t.Fatalf("ReadRequest: %v", err)
+	}
+	if got.BasicAuth != "admin:secret" {
+		t.Errorf("BasicAuth = %q, want %q", got.BasicAuth, "admin:secret")
+	}
+}
+
+func TestTunnelRequestBasicAuthOmitEmpty(t *testing.T) {
+	req := &TunnelRequest{Protocol: "http", LocalPort: 3000}
+
+	var buf bytes.Buffer
+	if err := WriteRequest(&buf, req); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+
+	if strings.Contains(buf.String(), `"basic_auth"`) {
+		t.Errorf("JSON contains 'basic_auth' key despite omitempty: %s", buf.String())
+	}
+}
+
 func TestReadRequestInvalidJSON(t *testing.T) {
 	r := strings.NewReader("not json")
 	_, err := ReadRequest(r)

@@ -147,7 +147,7 @@ func handleConnection(conn net.Conn) {
 		return
 	}
 
-	registry.Register(subdomain, session)
+	registry.Register(subdomain, session, req.BasicAuth)
 
 	resp := &protocol.TunnelResponse{Subdomain: subdomain, Success: true}
 	if err := protocol.WriteResponse(controlStream, resp); err != nil {
@@ -197,9 +197,13 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	session, ok := registry.GetSession(subdomain)
+	entry, ok := registry.GetEntry(subdomain)
 	if !ok {
 		http.Error(w, "tunnel not found", http.StatusBadGateway)
+		return
+	}
+
+	if !checkBasicAuth(w, r, entry.BasicAuth) {
 		return
 	}
 
@@ -225,7 +229,7 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	// Proxy the first request (already parsed by net/http) and then loop
 	// to handle subsequent keep-alive requests on the same connection.
-	if !proxyRequest(r, subdomain, session, rawConn) {
+	if !proxyRequest(r, subdomain, entry.Session, rawConn) {
 		return
 	}
 
@@ -246,11 +250,18 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		if sub == "" {
 			return
 		}
-		sess, ok := registry.GetSession(sub)
+		ent, ok := registry.GetEntry(sub)
 		if !ok {
 			return
 		}
-		if !proxyRequest(req, sub, sess, rawConn) {
+		if ent.BasicAuth != "" {
+			user, pass, ok := req.BasicAuth()
+			if !ok || user+":"+pass != ent.BasicAuth {
+				writeRaw401(rawConn)
+				return
+			}
+		}
+		if !proxyRequest(req, sub, ent.Session, rawConn) {
 			return
 		}
 	}
@@ -310,6 +321,40 @@ func proxyRequest(r *http.Request, subdomain string, session *yamux.Session, cli
 	// Write the response back to the browser in wire format.
 	err = resp.Write(clientConn)
 	return err == nil
+}
+
+// checkBasicAuth validates the request's Authorization header against the
+// expected "user:pass" credential. Returns true if auth passes (or no auth
+// is required). Writes a 401 response and returns false if auth fails.
+func checkBasicAuth(w http.ResponseWriter, r *http.Request, expected string) bool {
+	if expected == "" {
+		return true
+	}
+	user, pass, ok := r.BasicAuth()
+	if !ok || user+":"+pass != expected {
+		w.Header().Set("WWW-Authenticate", `Basic realm="Ratatosk Tunnel"`)
+		http.Error(w, "Unauthorized", http.StatusUnauthorized)
+		return false
+	}
+	return true
+}
+
+// writeRaw401 writes a raw HTTP/1.1 401 response with WWW-Authenticate header
+// to a hijacked connection.
+func writeRaw401(conn net.Conn) {
+	body := "Unauthorized"
+	resp := &http.Response{
+		StatusCode: http.StatusUnauthorized,
+		ProtoMajor: 1,
+		ProtoMinor: 1,
+		Header: http.Header{
+			"WWW-Authenticate": {`Basic realm="Ratatosk Tunnel"`},
+			"Content-Type":     {"text/plain"},
+		},
+		Body:          io.NopCloser(strings.NewReader(body)),
+		ContentLength: int64(len(body)),
+	}
+	resp.Write(conn)
 }
 
 // initDefaultConfig initializes cfg with defaults for tests that don't call main().

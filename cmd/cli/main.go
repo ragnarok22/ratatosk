@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net"
 	"os"
+	"strings"
 
 	"ratatosk/internal/inspector"
 	"ratatosk/internal/protocol"
@@ -34,18 +35,24 @@ func main() {
 
 	port := flag.Int("port", 3000, "local port to expose")
 	streamer := flag.Bool("streamer", false, "redact sensitive data from output for streaming")
+	basicAuth := flag.String("basic-auth", "", "require basic auth for tunnel visitors (format: user:pass)")
 	flag.Parse()
+
+	if *basicAuth != "" && !strings.Contains(*basicAuth, ":") {
+		fmt.Fprintf(os.Stderr, "Error: --basic-auth must be in 'user:pass' format\n")
+		os.Exit(1)
+	}
 
 	redact.Enabled = *streamer
 	slog.SetDefault(slog.New(redact.NewHandler(slog.NewTextHandler(os.Stdout, nil))))
 
-	if err := runClient("localhost:7000", *port); err != nil {
+	if err := runClient("localhost:7000", *port, *basicAuth); err != nil {
 		slog.Error("client error", "error", err)
 		os.Exit(1)
 	}
 }
 
-func runClient(serverAddr string, localPort int) error {
+func runClient(serverAddr string, localPort int, basicAuth string) error {
 	localAddr := fmt.Sprintf("localhost:%d", localPort)
 
 	conn, err := net.Dial("tcp", serverAddr)
@@ -67,7 +74,7 @@ func runClient(serverAddr string, localPort int) error {
 		return fmt.Errorf("failed to open control stream: %w", err)
 	}
 
-	req := &protocol.TunnelRequest{Protocol: "http", LocalPort: localPort}
+	req := &protocol.TunnelRequest{Protocol: "http", LocalPort: localPort, BasicAuth: basicAuth}
 	if err := protocol.WriteRequest(controlStream, req); err != nil {
 		return fmt.Errorf("failed to send tunnel request: %w", err)
 	}
@@ -92,6 +99,9 @@ func runClient(serverAddr string, localPort int) error {
 		fmt.Printf("Forwarding      http://%s.localhost:8080 -> http://localhost:[REDACTED]\n", resp.Subdomain)
 	} else {
 		fmt.Printf("Forwarding      http://%s.localhost:8080 -> http://localhost:%d\n", resp.Subdomain, localPort)
+	}
+	if basicAuth != "" {
+		fmt.Printf("Basic Auth      enabled (user: %s)\n", strings.SplitN(basicAuth, ":", 2)[0])
 	}
 	if inspectorErr != nil {
 		slog.Warn("failed to start inspector", "error", inspectorErr)

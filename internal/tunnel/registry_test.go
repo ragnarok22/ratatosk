@@ -42,7 +42,7 @@ func TestRegisterAndGetSession(t *testing.T) {
 	r := NewRegistry()
 	_, session := newTestSession(t)
 
-	r.Register("abc123", session)
+	r.Register("abc123", session, "")
 
 	got, ok := r.GetSession("abc123")
 	if !ok {
@@ -65,7 +65,7 @@ func TestUnregister(t *testing.T) {
 	r := NewRegistry()
 	_, session := newTestSession(t)
 
-	r.Register("abc123", session)
+	r.Register("abc123", session, "")
 	r.Unregister("abc123")
 
 	_, ok := r.GetSession("abc123")
@@ -85,8 +85,8 @@ func TestRegisterOverwrite(t *testing.T) {
 	_, sess1 := newTestSession(t)
 	_, sess2 := newTestSession(t)
 
-	r.Register("sub", sess1)
-	r.Register("sub", sess2)
+	r.Register("sub", sess1, "")
+	r.Register("sub", sess2, "")
 
 	got, ok := r.GetSession("sub")
 	if !ok {
@@ -105,7 +105,7 @@ func TestHasSubdomain(t *testing.T) {
 		t.Fatal("HasSubdomain returned true before registration")
 	}
 
-	r.Register("abc123", session)
+	r.Register("abc123", session, "")
 	if !r.HasSubdomain("abc123") {
 		t.Fatal("HasSubdomain returned false after registration")
 	}
@@ -121,8 +121,8 @@ func TestListTunnels(t *testing.T) {
 	_, sess1 := newTestSession(t)
 	_, sess2 := newTestSession(t)
 
-	r.Register("alpha", sess1)
-	r.Register("beta", sess2)
+	r.Register("alpha", sess1, "")
+	r.Register("beta", sess2, "")
 
 	tunnels := r.ListTunnels()
 	if len(tunnels) != 2 {
@@ -149,6 +149,47 @@ func TestListTunnelsEmpty(t *testing.T) {
 	}
 }
 
+func TestGetEntry(t *testing.T) {
+	r := NewRegistry()
+	_, session := newTestSession(t)
+
+	r.Register("abc123", session, "")
+
+	entry, ok := r.GetEntry("abc123")
+	if !ok {
+		t.Fatal("GetEntry returned false for registered subdomain")
+	}
+	if entry.Session != session {
+		t.Fatal("GetEntry returned a different session")
+	}
+	if entry.BasicAuth != "" {
+		t.Errorf("BasicAuth = %q, want empty", entry.BasicAuth)
+	}
+}
+
+func TestGetEntryNotFound(t *testing.T) {
+	r := NewRegistry()
+	_, ok := r.GetEntry("nonexistent")
+	if ok {
+		t.Fatal("GetEntry returned true for unregistered subdomain")
+	}
+}
+
+func TestRegisterWithBasicAuth(t *testing.T) {
+	r := NewRegistry()
+	_, session := newTestSession(t)
+
+	r.Register("secure", session, "admin:secret")
+
+	entry, ok := r.GetEntry("secure")
+	if !ok {
+		t.Fatal("GetEntry returned false for registered subdomain")
+	}
+	if entry.BasicAuth != "admin:secret" {
+		t.Errorf("BasicAuth = %q, want %q", entry.BasicAuth, "admin:secret")
+	}
+}
+
 func TestConcurrentAccess(t *testing.T) {
 	r := NewRegistry()
 
@@ -166,7 +207,7 @@ func TestConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			r.Register(fmt.Sprintf("sub-%d", i), sessions[i])
+			r.Register(fmt.Sprintf("sub-%d", i), sessions[i], "")
 		}(i)
 	}
 	wg.Wait()

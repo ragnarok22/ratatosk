@@ -66,7 +66,7 @@ func TestRunClientHappyPath(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	})
 
-	if err := runClient(addr, 13001); err != nil {
+	if err := runClient(addr, 13001, ""); err != nil {
 		t.Fatalf("runClient: %v", err)
 	}
 }
@@ -80,7 +80,7 @@ func TestRunClientConnectionRefused(t *testing.T) {
 	addr := ln.Addr().String()
 	ln.Close()
 
-	if err := runClient(addr, 3000); err == nil {
+	if err := runClient(addr, 3000, ""); err == nil {
 		t.Fatal("expected connection error")
 	}
 }
@@ -106,7 +106,7 @@ func TestRunClientHandshakeFailure(t *testing.T) {
 		cs.Close()
 	})
 
-	err := runClient(addr, 3000)
+	err := runClient(addr, 3000, "")
 	if err == nil {
 		t.Fatal("expected error for rejected handshake")
 	}
@@ -121,7 +121,7 @@ func TestRunClientBadServer(t *testing.T) {
 	// Allow a moment for the listener to be ready.
 	time.Sleep(10 * time.Millisecond)
 
-	err := runClient(addr, 3000)
+	err := runClient(addr, 3000, "")
 	if err == nil {
 		t.Fatal("expected error for bad server data")
 	}
@@ -142,7 +142,7 @@ func TestRunClientAbruptDisconnect(t *testing.T) {
 		conn.Close()
 	})
 
-	if err := runClient(addr, 13002); err != nil {
+	if err := runClient(addr, 13002, ""); err != nil {
 		t.Fatalf("runClient: %v", err)
 	}
 }
@@ -155,7 +155,7 @@ func TestRunClientServerClosesEarly(t *testing.T) {
 		conn.Close()
 	})
 
-	err := runClient(addr, 3000)
+	err := runClient(addr, 3000, "")
 	if err == nil {
 		t.Fatal("expected error when server closes session before handshake")
 	}
@@ -172,7 +172,7 @@ func TestRunClientReadResponseError(t *testing.T) {
 		conn.Close()
 	})
 
-	err := runClient(addr, 3000)
+	err := runClient(addr, 3000, "")
 	if err == nil {
 		t.Fatal("expected error when server closes without responding")
 	}
@@ -211,7 +211,43 @@ func TestRunClientWithTraffic(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	})
 
-	if err := runClient(addr, port); err != nil {
+	if err := runClient(addr, port, ""); err != nil {
+		t.Fatalf("runClient: %v", err)
+	}
+}
+
+func TestRunClientWithBasicAuth(t *testing.T) {
+	addr := startMockRelay(t, func(conn net.Conn) {
+		defer conn.Close()
+		session, err := tunnel.NewServerSession(conn)
+		if err != nil {
+			return
+		}
+		defer session.Close()
+
+		cs, err := session.Accept()
+		if err != nil {
+			return
+		}
+		req, err := protocol.ReadRequest(cs)
+		if err != nil {
+			cs.Close()
+			return
+		}
+		if req.BasicAuth != "admin:secret" {
+			cs.Close()
+			return
+		}
+		protocol.WriteResponse(cs, &protocol.TunnelResponse{
+			Success:   true,
+			Subdomain: "test-auth",
+		})
+		cs.Close()
+
+		time.Sleep(100 * time.Millisecond)
+	})
+
+	if err := runClient(addr, 13003, "admin:secret"); err != nil {
 		t.Fatalf("runClient: %v", err)
 	}
 }
@@ -273,7 +309,7 @@ func TestRunClientStreamerBanner(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	})
 
-	runClient(addr, 9999)
+	runClient(addr, 9999, "")
 
 	w.Close()
 	var buf bytes.Buffer

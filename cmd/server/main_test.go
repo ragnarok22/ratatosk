@@ -107,6 +107,12 @@ func TestHandleHTTPTunnelNotFound(t *testing.T) {
 // requests to the given local server. Returns the registered subdomain.
 func setupTunnel(t *testing.T, subdomain string, localAddr string) {
 	t.Helper()
+	setupTunnelWithAuth(t, subdomain, localAddr, "")
+}
+
+// setupTunnelWithAuth creates a yamux tunnel with optional basic auth.
+func setupTunnelWithAuth(t *testing.T, subdomain string, localAddr string, basicAuth string) {
+	t.Helper()
 
 	clientPipe, serverPipe := net.Pipe()
 	t.Cleanup(func() { clientPipe.Close(); serverPipe.Close() })
@@ -115,7 +121,7 @@ func setupTunnel(t *testing.T, subdomain string, localAddr string) {
 	if err != nil {
 		t.Fatalf("NewServerSession: %v", err)
 	}
-	registry.Register(subdomain, serverSession)
+	registry.Register(subdomain, serverSession, basicAuth)
 	t.Cleanup(func() { registry.Unregister(subdomain) })
 
 	clientSession, err := tunnel.NewClientSession(clientPipe)
@@ -565,7 +571,7 @@ func TestHTTPProxyClientNoResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServerSession: %v", err)
 	}
-	registry.Register("drop-req", serverSession)
+	registry.Register("drop-req", serverSession, "")
 	t.Cleanup(func() { registry.Unregister("drop-req") })
 
 	clientSession, err := tunnel.NewClientSession(clientPipe)
@@ -723,7 +729,7 @@ func TestHandleHTTPNoHijackSupport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServerSession: %v", err)
 	}
-	registry.Register("nohijack", serverSession)
+	registry.Register("nohijack", serverSession, "")
 	t.Cleanup(func() { registry.Unregister("nohijack") })
 
 	clientSession, err := tunnel.NewClientSession(clientPipe)
@@ -740,5 +746,163 @@ func TestHandleHTTPNoHijackSupport(t *testing.T) {
 
 	if w.Code != http.StatusInternalServerError {
 		t.Errorf("status = %d, want 500", w.Code)
+	}
+}
+
+func TestCheckBasicAuthNoAuthRequired(t *testing.T) {
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	if !checkBasicAuth(w, r, "") {
+		t.Error("checkBasicAuth returned false when no auth required")
+	}
+	if w.Code != http.StatusOK {
+		t.Errorf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestCheckBasicAuthValid(t *testing.T) {
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	r.SetBasicAuth("admin", "secret")
+	if !checkBasicAuth(w, r, "admin:secret") {
+		t.Error("checkBasicAuth returned false for valid credentials")
+	}
+}
+
+func TestCheckBasicAuthInvalid(t *testing.T) {
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	r.SetBasicAuth("admin", "wrong")
+	if checkBasicAuth(w, r, "admin:secret") {
+		t.Error("checkBasicAuth returned true for invalid credentials")
+	}
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+	if w.Header().Get("WWW-Authenticate") != `Basic realm="Ratatosk Tunnel"` {
+		t.Errorf("WWW-Authenticate = %q", w.Header().Get("WWW-Authenticate"))
+	}
+}
+
+func TestCheckBasicAuthMissing(t *testing.T) {
+	w := httptest.NewRecorder()
+	r := httptest.NewRequest("GET", "/", nil)
+	if checkBasicAuth(w, r, "admin:secret") {
+		t.Error("checkBasicAuth returned true with no Authorization header")
+	}
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestHTTPProxyBasicAuthRejected(t *testing.T) {
+	// Register a tunnel with basic auth required.
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "should not reach")
+	}))
+	defer local.Close()
+
+	setupTunnelWithAuth(t, "auth-reject", local.Listener.Addr().String(), "admin:secret")
+
+	// Use httptest.NewRecorder — the request should be rejected before hijack.
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Host = "auth-reject.localhost:8080"
+
+	handleHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+	if w.Header().Get("WWW-Authenticate") != `Basic realm="Ratatosk Tunnel"` {
+		t.Errorf("WWW-Authenticate = %q", w.Header().Get("WWW-Authenticate"))
+	}
+}
+
+func TestHTTPProxyBasicAuthAccepted(t *testing.T) {
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "authenticated")
+	}))
+	defer local.Close()
+
+	setupTunnelWithAuth(t, "auth-ok", local.Listener.Addr().String(), "admin:secret")
+	proxyAddr := startProxyServer(t)
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	fmt.Fprintf(conn, "GET /page HTTP/1.1\r\nHost: auth-ok.localhost:8080\r\nAuthorization: Basic YWRtaW46c2VjcmV0\r\nConnection: close\r\n\r\n")
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if string(body) != "authenticated" {
+		t.Errorf("body = %q, want %q", body, "authenticated")
+	}
+}
+
+func TestHTTPProxyBasicAuthWrongCredentials(t *testing.T) {
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "should not reach")
+	}))
+	defer local.Close()
+
+	setupTunnelWithAuth(t, "auth-wrong", local.Listener.Addr().String(), "admin:secret")
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Host = "auth-wrong.localhost:8080"
+	req.SetBasicAuth("admin", "wrong")
+
+	handleHTTP(w, req)
+
+	if w.Code != http.StatusUnauthorized {
+		t.Errorf("status = %d, want 401", w.Code)
+	}
+}
+
+func TestHTTPProxyNoAuthPublicTunnel(t *testing.T) {
+	// Tunnel without auth — should work without credentials.
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "public")
+	}))
+	defer local.Close()
+
+	setupTunnel(t, "no-auth", local.Listener.Addr().String())
+	proxyAddr := startProxyServer(t)
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: no-auth.localhost:8080\r\nConnection: close\r\n\r\n")
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+	if string(body) != "public" {
+		t.Errorf("body = %q, want %q", body, "public")
 	}
 }
