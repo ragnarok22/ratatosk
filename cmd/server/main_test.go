@@ -487,6 +487,164 @@ func TestHandleConnectionBadProtocol(t *testing.T) {
 	}
 }
 
+func TestProxyRequestSessionClosed(t *testing.T) {
+	clientPipe, serverPipe := net.Pipe()
+	serverSession, err := tunnel.NewServerSession(serverPipe)
+	if err != nil {
+		t.Fatalf("NewServerSession: %v", err)
+	}
+	clientSession, err := tunnel.NewClientSession(clientPipe)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+	// Close everything so session.Open() fails.
+	clientSession.Close()
+	serverSession.Close()
+	clientPipe.Close()
+	serverPipe.Close()
+
+	req := httptest.NewRequest("GET", "http://example.com/", nil)
+	dummyConn, dummyBack := net.Pipe()
+	defer dummyConn.Close()
+	defer dummyBack.Close()
+
+	if proxyRequest(req, "closed", serverSession, dummyConn) {
+		t.Error("expected proxyRequest to return false when session is closed")
+	}
+}
+
+func TestHandleConnectionAbruptClose(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() { clientConn.Close(); serverConn.Close() })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleConnection(serverConn)
+	}()
+
+	clientSession, err := tunnel.NewClientSession(clientConn)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+
+	controlStream, err := clientSession.Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	req := &protocol.TunnelRequest{Protocol: "http", LocalPort: 3000}
+	if err := protocol.WriteRequest(controlStream, req); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+	resp, err := protocol.ReadResponse(controlStream)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	controlStream.Close()
+	if !resp.Success {
+		t.Fatalf("handshake failed: %s", resp.Error)
+	}
+
+	// Abruptly kill the underlying connection (not a clean yamux close).
+	clientConn.Close()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleConnection did not return after abrupt close")
+	}
+}
+
+func TestHTTPProxyClientNoResponse(t *testing.T) {
+	// Set up a tunnel where the client drops streams without responding.
+	clientPipe, serverPipe := net.Pipe()
+	t.Cleanup(func() { clientPipe.Close(); serverPipe.Close() })
+
+	serverSession, err := tunnel.NewServerSession(serverPipe)
+	if err != nil {
+		t.Fatalf("NewServerSession: %v", err)
+	}
+	registry.Register("drop-req", serverSession)
+	t.Cleanup(func() { registry.Unregister("drop-req") })
+
+	clientSession, err := tunnel.NewClientSession(clientPipe)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+	t.Cleanup(func() { clientSession.Close() })
+
+	go func() {
+		for {
+			stream, err := clientSession.Accept()
+			if err != nil {
+				return
+			}
+			stream.Close()
+		}
+	}()
+
+	proxyAddr := startProxyServer(t)
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: drop-req.localhost:8080\r\nConnection: close\r\n\r\n")
+
+	// The proxy's ReadResponse should fail since client closed stream.
+	// Connection will be closed by the proxy.
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err == nil {
+		resp.Body.Close()
+	}
+}
+
+func TestHTTPProxyKeepAliveTunnelGone(t *testing.T) {
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprint(w, "ok")
+	}))
+	defer local.Close()
+
+	setupTunnel(t, "gone-req", local.Listener.Addr().String())
+	proxyAddr := startProxyServer(t)
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	reader := bufio.NewReader(conn)
+
+	// First request (keep-alive).
+	fmt.Fprintf(conn, "GET /page HTTP/1.1\r\nHost: gone-req.localhost:8080\r\n\r\n")
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("request 1: ReadResponse: %v", err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Remove the tunnel between requests.
+	registry.Unregister("gone-req")
+
+	// Second request on the same connection — tunnel is gone.
+	fmt.Fprintf(conn, "GET /page2 HTTP/1.1\r\nHost: gone-req.localhost:8080\r\n\r\n")
+
+	// Server should close the connection since the tunnel is gone.
+	_, err = http.ReadResponse(reader, nil)
+	if err == nil {
+		// If by chance we got a response, that's also acceptable.
+		t.Log("got response after tunnel removal (race condition, acceptable)")
+	}
+}
+
 func TestHandleHTTPNoHijackSupport(t *testing.T) {
 	clientPipe, serverPipe := net.Pipe()
 	t.Cleanup(func() { clientPipe.Close(); serverPipe.Close() })

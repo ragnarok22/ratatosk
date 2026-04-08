@@ -33,48 +33,50 @@ func main() {
 
 	port := flag.Int("port", 3000, "local port to expose")
 	flag.Parse()
-	localAddr := fmt.Sprintf("localhost:%d", *port)
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
 
-	conn, err := net.Dial("tcp", "localhost:7000")
-	if err != nil {
-		slog.Error("failed to connect to relay server", "addr", "localhost:7000", "error", err)
+	if err := runClient("localhost:7000", *port); err != nil {
+		slog.Error("client error", "error", err)
 		os.Exit(1)
 	}
+}
+
+func runClient(serverAddr string, localPort int) error {
+	localAddr := fmt.Sprintf("localhost:%d", localPort)
+
+	conn, err := net.Dial("tcp", serverAddr)
+	if err != nil {
+		return fmt.Errorf("failed to connect to relay server at %s: %w", serverAddr, err)
+	}
 	defer conn.Close()
-	slog.Info("connected to relay server", "addr", "localhost:7000")
+	slog.Info("connected to relay server", "addr", serverAddr)
 
 	session, err := tunnel.NewClientSession(conn)
 	if err != nil {
-		slog.Error("failed to create yamux session", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to create yamux session: %w", err)
 	}
 	defer session.Close()
 
 	// Open a control stream and perform the handshake.
 	controlStream, err := session.Open()
 	if err != nil {
-		slog.Error("failed to open control stream", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to open control stream: %w", err)
 	}
 
-	req := &protocol.TunnelRequest{Protocol: "http", LocalPort: *port}
+	req := &protocol.TunnelRequest{Protocol: "http", LocalPort: localPort}
 	if err := protocol.WriteRequest(controlStream, req); err != nil {
-		slog.Error("failed to send tunnel request", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to send tunnel request: %w", err)
 	}
 
 	resp, err := protocol.ReadResponse(controlStream)
 	if err != nil {
-		slog.Error("failed to read tunnel response", "error", err)
-		os.Exit(1)
+		return fmt.Errorf("failed to read tunnel response: %w", err)
 	}
 	controlStream.Close()
 
 	if !resp.Success {
-		slog.Error("tunnel creation failed", "error", resp.Error)
-		os.Exit(1)
+		return fmt.Errorf("tunnel creation failed: %s", resp.Error)
 	}
 
 	logger := inspector.NewLogger()
@@ -83,7 +85,7 @@ func main() {
 	fmt.Println()
 	fmt.Println("Ratatosk                        (Ctrl+C to quit)")
 	fmt.Println()
-	fmt.Printf("Forwarding      http://%s.localhost:8080 -> http://localhost:%d\n", resp.Subdomain, *port)
+	fmt.Printf("Forwarding      http://%s.localhost:8080 -> http://localhost:%d\n", resp.Subdomain, localPort)
 	if inspectorErr != nil {
 		slog.Warn("failed to start inspector", "error", inspectorErr)
 	} else {
@@ -99,7 +101,7 @@ func main() {
 			} else {
 				slog.Error("session error", "error", err)
 			}
-			return
+			return nil
 		}
 		go handleStream(stream, localAddr, logger)
 	}
