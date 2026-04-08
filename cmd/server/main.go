@@ -298,7 +298,7 @@ func handleHTTPTunnel(session *yamux.Session, controlStream net.Conn, req *proto
 		return
 	}
 
-	registry.Register(subdomain, session, req.BasicAuth)
+	registry.Register(subdomain, session, req.BasicAuth, protocol.ProtoHTTP)
 
 	resp := &protocol.TunnelResponse{Subdomain: subdomain, URL: cfg.TunnelURL(subdomain), Success: true}
 	if err := protocol.WriteResponse(controlStream, resp); err != nil {

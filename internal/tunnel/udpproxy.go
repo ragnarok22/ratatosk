@@ -90,7 +90,7 @@ func (pm *peerManager) reapIdle() {
 }
 
 // startReaper runs a background goroutine that periodically removes idle peers.
-// It returns when ctx is cancelled.
+// It returns when ctx is canceled.
 func (pm *peerManager) startReaper(ctx context.Context) {
 	ticker := time.NewTicker(30 * time.Second)
 	defer ticker.Stop()

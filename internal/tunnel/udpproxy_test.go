@@ -132,7 +132,9 @@ func TestServeUDPMultipleClients(t *testing.T) {
 					if err != nil {
 						return
 					}
-					WriteFrame(stream, data)
+					if err := WriteFrame(stream, data); err != nil {
+						return
+					}
 				}
 			}()
 		}

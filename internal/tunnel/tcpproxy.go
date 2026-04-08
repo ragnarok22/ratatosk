@@ -10,7 +10,7 @@ import (
 )
 
 // ServeTCP accepts connections on ln and proxies each one through a new
-// yamux stream to the remote client. It blocks until ctx is cancelled or
+// yamux stream to the remote client. It blocks until ctx is canceled or
 // the listener is closed.
 func ServeTCP(ctx context.Context, ln net.Listener, session *yamux.Session) {
 	for {
