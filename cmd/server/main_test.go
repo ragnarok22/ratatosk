@@ -864,7 +864,7 @@ func setupTunnelWithAuth(t *testing.T, subdomain string, localAddr string, basic
 	if err != nil {
 		t.Fatalf("NewServerSession: %v", err)
 	}
-	registry.Register(subdomain, serverSession, basicAuth)
+	registry.Register(subdomain, serverSession, basicAuth, protocol.ProtoHTTP)
 	t.Cleanup(func() { registry.Unregister(subdomain) })
 
 	clientSession, err := tunnel.NewClientSession(clientPipe)
@@ -1423,7 +1423,7 @@ func TestHTTPProxyClientNoResponse(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServerSession: %v", err)
 	}
-	registry.Register("drop-req", serverSession, "")
+	registry.Register("drop-req", serverSession, "", protocol.ProtoHTTP)
 	t.Cleanup(func() { registry.Unregister("drop-req") })
 
 	clientSession, err := tunnel.NewClientSession(clientPipe)
@@ -1640,7 +1640,7 @@ func TestHandleHTTPNoHijackSupport(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewServerSession: %v", err)
 	}
-	registry.Register("nohijack", serverSession, "")
+	registry.Register("nohijack", serverSession, "", protocol.ProtoHTTP)
 	t.Cleanup(func() { registry.Unregister("nohijack") })
 
 	clientSession, err := tunnel.NewClientSession(clientPipe)
@@ -2115,7 +2115,7 @@ func TestHandleHTTPTunnelUniqueSubdomainFailure(t *testing.T) {
 		serverGenerateSubdomain = oldGenerateSubdomain
 	})
 
-	registry.Register("taken", nil, "")
+	registry.Register("taken", nil, "", protocol.ProtoHTTP)
 
 	clientConn, serverConn := net.Pipe()
 	done := make(chan struct{})

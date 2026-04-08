@@ -43,12 +43,13 @@ func NewRegistry() *Registry {
 }
 
 // Register associates a subdomain with a yamux session.
-func (r *Registry) Register(subdomain string, session *yamux.Session, basicAuth string) {
+func (r *Registry) Register(subdomain string, session *yamux.Session, basicAuth string, protocol string) {
 	r.mu.Lock()
 	r.sessions[subdomain] = &TunnelEntry{
 		Session:     session,
 		ConnectedAt: time.Now(),
 		BasicAuth:   basicAuth,
+		Protocol:    protocol,
 	}
 	r.mu.Unlock()
 }

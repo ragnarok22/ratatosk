@@ -43,7 +43,7 @@ func TestRegisterAndGetSession(t *testing.T) {
 	r := NewRegistry()
 	_, session := newTestSession(t)
 
-	r.Register("abc123", session, "")
+	r.Register("abc123", session, "", "http")
 
 	got, ok := r.GetSession("abc123")
 	if !ok {
@@ -66,7 +66,7 @@ func TestUnregister(t *testing.T) {
 	r := NewRegistry()
 	_, session := newTestSession(t)
 
-	r.Register("abc123", session, "")
+	r.Register("abc123", session, "", "http")
 	r.Unregister("abc123")
 
 	_, ok := r.GetSession("abc123")
@@ -86,8 +86,8 @@ func TestRegisterOverwrite(t *testing.T) {
 	_, sess1 := newTestSession(t)
 	_, sess2 := newTestSession(t)
 
-	r.Register("sub", sess1, "")
-	r.Register("sub", sess2, "")
+	r.Register("sub", sess1, "", "http")
+	r.Register("sub", sess2, "", "http")
 
 	got, ok := r.GetSession("sub")
 	if !ok {
@@ -106,7 +106,7 @@ func TestHasSubdomain(t *testing.T) {
 		t.Fatal("HasSubdomain returned true before registration")
 	}
 
-	r.Register("abc123", session, "")
+	r.Register("abc123", session, "", "http")
 	if !r.HasSubdomain("abc123") {
 		t.Fatal("HasSubdomain returned false after registration")
 	}
@@ -122,8 +122,8 @@ func TestListTunnels(t *testing.T) {
 	_, sess1 := newTestSession(t)
 	_, sess2 := newTestSession(t)
 
-	r.Register("alpha", sess1, "")
-	r.Register("beta", sess2, "")
+	r.Register("alpha", sess1, "", "http")
+	r.Register("beta", sess2, "", "http")
 
 	tunnels := r.ListTunnels()
 	if len(tunnels) != 2 {
@@ -135,6 +135,9 @@ func TestListTunnels(t *testing.T) {
 		names[ti.Subdomain] = true
 		if ti.ConnectedAt.IsZero() {
 			t.Fatalf("ConnectedAt is zero for %s", ti.Subdomain)
+		}
+		if ti.Protocol != "http" {
+			t.Errorf("Protocol = %q for %s, want %q", ti.Protocol, ti.Subdomain, "http")
 		}
 	}
 	if !names["alpha"] || !names["beta"] {
@@ -154,7 +157,7 @@ func TestGetEntry(t *testing.T) {
 	r := NewRegistry()
 	_, session := newTestSession(t)
 
-	r.Register("abc123", session, "")
+	r.Register("abc123", session, "", "http")
 
 	entry, ok := r.GetEntry("abc123")
 	if !ok {
@@ -180,7 +183,7 @@ func TestRegisterWithBasicAuth(t *testing.T) {
 	r := NewRegistry()
 	_, session := newTestSession(t)
 
-	r.Register("secure", session, "admin:secret")
+	r.Register("secure", session, "admin:secret", "http")
 
 	entry, ok := r.GetEntry("secure")
 	if !ok {
@@ -244,7 +247,7 @@ func TestListTunnelsMixed(t *testing.T) {
 	_, sess1 := newTestSession(t)
 	_, sess2 := newTestSession(t)
 
-	r.Register("alpha", sess1, "")
+	r.Register("alpha", sess1, "", "http")
 	r.RegisterPort(12345, &TunnelEntry{
 		Session:     sess2,
 		ConnectedAt: time.Now(),
@@ -336,7 +339,7 @@ func TestConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			r.Register(fmt.Sprintf("sub-%d", i), sessions[i], "")
+			r.Register(fmt.Sprintf("sub-%d", i), sessions[i], "", "http")
 		}(i)
 	}
 	wg.Wait()
