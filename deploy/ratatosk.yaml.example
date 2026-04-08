@@ -1,0 +1,38 @@
+# Ratatosk Relay Server Configuration
+# Copy this file to one of the following locations:
+#   /etc/ratatosk/ratatosk.yaml  (system-wide)
+#   ~/.ratatosk/ratatosk.yaml    (user-level)
+#   ./ratatosk.yaml              (current directory)
+#
+# All values can also be set via environment variables with the RATATOSK_ prefix.
+# Example: RATATOSK_BASE_DOMAIN=tunnel.example.com
+
+# The base domain used for generating tunnel subdomains.
+# Each tunnel gets a URL like: <subdomain>.<base_domain>
+# For local development, "localhost" works fine.
+# For production, set this to your wildcard DNS domain (e.g., "tunnel.example.com").
+base_domain: localhost
+
+# Port for the public HTTP(S) proxy that routes traffic to tunnels.
+# In production with TLS, set this to 443.
+public_port: 8080
+
+# Port for the admin dashboard and API.
+admin_port: 8081
+
+# Port for the TCP control plane where CLI clients connect.
+control_port: 7000
+
+# TLS Configuration
+# Enable TLS for the public proxy. Requires a valid certificate and key.
+# For wildcard subdomains, you need a wildcard certificate (e.g., *.tunnel.example.com).
+# You can obtain one for free using Let's Encrypt with a DNS-01 challenge.
+tls_enabled: false
+
+# Path to the TLS certificate file (PEM format).
+# For Let's Encrypt: /etc/letsencrypt/live/tunnel.example.com/fullchain.pem
+tls_cert_file: ""
+
+# Path to the TLS private key file (PEM format).
+# For Let's Encrypt: /etc/letsencrypt/live/tunnel.example.com/privkey.pem
+tls_key_file: ""

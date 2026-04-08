@@ -1,0 +1,41 @@
+[Unit]
+Description=Ratatosk Relay Server
+Documentation=https://github.com/reinier-hernandez/ratatosk
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ratatosk
+Group=ratatosk
+ExecStart=/usr/local/bin/ratatosk-server
+WorkingDirectory=/etc/ratatosk
+
+# Allow binding to privileged ports (80, 443) without running as root.
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+
+# Reliability
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadOnlyPaths=/etc/ratatosk
+ReadWritePaths=/var/log/ratatosk
+
+# Environment (overrides config file values)
+# EnvironmentFile=-/etc/ratatosk/ratatosk.env
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=ratatosk
+
+[Install]
+WantedBy=multi-user.target
