@@ -39,6 +39,29 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.TLSEnabled {
 		t.Error("TLSEnabled should be false by default")
 	}
+	if cfg.PortRangeStart != 10000 {
+		t.Errorf("PortRangeStart = %d, want %d", cfg.PortRangeStart, 10000)
+	}
+	if cfg.PortRangeEnd != 20000 {
+		t.Errorf("PortRangeEnd = %d, want %d", cfg.PortRangeEnd, 20000)
+	}
+}
+
+func TestLoadConfigPortRangeFromEnv(t *testing.T) {
+	t.Setenv("RATATOSK_PORT_RANGE_START", "5000")
+	t.Setenv("RATATOSK_PORT_RANGE_END", "6000")
+
+	cfg, err := LoadConfig()
+	if err != nil {
+		t.Fatalf("LoadConfig: %v", err)
+	}
+
+	if cfg.PortRangeStart != 5000 {
+		t.Errorf("PortRangeStart = %d, want %d", cfg.PortRangeStart, 5000)
+	}
+	if cfg.PortRangeEnd != 6000 {
+		t.Errorf("PortRangeEnd = %d, want %d", cfg.PortRangeEnd, 6000)
+	}
 }
 
 func TestLoadConfigFromEnv(t *testing.T) {

@@ -7,6 +7,13 @@ import (
 	"math/rand/v2"
 )
 
+// Protocol identifiers sent in TunnelRequest.
+const (
+	ProtoHTTP = "http"
+	ProtoTCP  = "tcp"
+	ProtoUDP  = "udp"
+)
+
 // TunnelRequest is sent by the CLI client to request a new tunnel.
 type TunnelRequest struct {
 	Protocol  string `json:"protocol"`
@@ -16,8 +23,9 @@ type TunnelRequest struct {
 
 // TunnelResponse is sent by the server after processing a tunnel request.
 type TunnelResponse struct {
-	Subdomain string `json:"subdomain"`
+	Subdomain string `json:"subdomain,omitempty"`
 	URL       string `json:"url,omitempty"`
+	Port      int    `json:"port,omitempty"`
 	Success   bool   `json:"success"`
 	Error     string `json:"error,omitempty"`
 }

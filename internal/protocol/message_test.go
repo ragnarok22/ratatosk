@@ -179,3 +179,89 @@ func TestReadResponseInvalidJSON(t *testing.T) {
 		t.Fatal("ReadResponse with invalid JSON should return error")
 	}
 }
+
+func TestTunnelRequestTCPRoundTrip(t *testing.T) {
+	req := &TunnelRequest{Protocol: ProtoTCP, LocalPort: 22}
+
+	var buf bytes.Buffer
+	if err := WriteRequest(&buf, req); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+
+	got, err := ReadRequest(&buf)
+	if err != nil {
+		t.Fatalf("ReadRequest: %v", err)
+	}
+	if got.Protocol != ProtoTCP {
+		t.Errorf("Protocol = %q, want %q", got.Protocol, ProtoTCP)
+	}
+	if got.LocalPort != 22 {
+		t.Errorf("LocalPort = %d, want 22", got.LocalPort)
+	}
+}
+
+func TestTunnelRequestUDPRoundTrip(t *testing.T) {
+	req := &TunnelRequest{Protocol: ProtoUDP, LocalPort: 25565}
+
+	var buf bytes.Buffer
+	if err := WriteRequest(&buf, req); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+
+	got, err := ReadRequest(&buf)
+	if err != nil {
+		t.Fatalf("ReadRequest: %v", err)
+	}
+	if got.Protocol != ProtoUDP {
+		t.Errorf("Protocol = %q, want %q", got.Protocol, ProtoUDP)
+	}
+	if got.LocalPort != 25565 {
+		t.Errorf("LocalPort = %d, want 25565", got.LocalPort)
+	}
+}
+
+func TestTunnelResponseWithPort(t *testing.T) {
+	resp := &TunnelResponse{Port: 12345, Success: true}
+
+	var buf bytes.Buffer
+	if err := WriteResponse(&buf, resp); err != nil {
+		t.Fatalf("WriteResponse: %v", err)
+	}
+
+	got, err := ReadResponse(&buf)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if got.Port != 12345 {
+		t.Errorf("Port = %d, want 12345", got.Port)
+	}
+	if !got.Success {
+		t.Error("Success = false, want true")
+	}
+}
+
+func TestTunnelResponsePortOmitEmpty(t *testing.T) {
+	resp := &TunnelResponse{Subdomain: "calm-fox-0001", Success: true}
+
+	var buf bytes.Buffer
+	if err := WriteResponse(&buf, resp); err != nil {
+		t.Fatalf("WriteResponse: %v", err)
+	}
+
+	if strings.Contains(buf.String(), `"port"`) {
+		t.Errorf("JSON contains 'port' key despite omitempty: %s", buf.String())
+	}
+}
+
+func TestTunnelResponseSubdomainOmitEmpty(t *testing.T) {
+	resp := &TunnelResponse{Port: 12345, Success: true}
+
+	var buf bytes.Buffer
+	if err := WriteResponse(&buf, resp); err != nil {
+		t.Fatalf("WriteResponse: %v", err)
+	}
+
+	if strings.Contains(buf.String(), `"subdomain"`) {
+		t.Errorf("JSON contains 'subdomain' key despite omitempty: %s", buf.String())
+	}
+}
