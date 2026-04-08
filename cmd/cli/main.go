@@ -109,7 +109,7 @@ func runProtoCommand(
 	flags := flag.NewFlagSet("ratatosk "+proto, flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	server := flags.String("server", "localhost:7000", "relay server address (host:port)")
-	if err := flags.Parse(args); err != nil {
+	if err := flags.Parse(reorderProtoArgs(args)); err != nil {
 		return 2
 	}
 
@@ -136,6 +136,30 @@ func runProtoCommand(
 		return 1
 	}
 	return 0
+}
+
+func reorderProtoArgs(args []string) []string {
+	flagArgs := make([]string, 0, len(args))
+	positional := make([]string, 0, len(args))
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg == "--server" || arg == "-server" {
+			flagArgs = append(flagArgs, arg)
+			if i+1 < len(args) {
+				flagArgs = append(flagArgs, args[i+1])
+				i++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--server=") || strings.HasPrefix(arg, "-server=") {
+			flagArgs = append(flagArgs, arg)
+			continue
+		}
+		positional = append(positional, arg)
+	}
+
+	return append(flagArgs, positional...)
 }
 
 func runClient(serverAddr string, localPort int, basicAuth string) error {
