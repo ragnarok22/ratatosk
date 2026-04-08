@@ -24,33 +24,52 @@ var (
 	registry  = tunnel.NewRegistry()
 	cfg       *config.ServerConfig
 	portAlloc *tunnel.PortAllocator
+
+	mainStdout            io.Writer = os.Stdout
+	mainExit                        = os.Exit
+	mainLoadConfig                  = config.LoadConfig
+	mainListen                      = net.Listen
+	mainListenAndServe              = http.ListenAndServe
+	mainListenAndServeTLS           = http.ListenAndServeTLS
 )
 
 func main() {
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+	if code := runMain(mainStdout, mainLoadConfig, mainListen, mainListenAndServe, mainListenAndServeTLS); code != 0 {
+		mainExit(code)
+	}
+}
 
-	if err := loadServerConfig(config.LoadConfig); err != nil {
+func runMain(
+	stdout io.Writer,
+	loadConfig func() (*config.ServerConfig, error),
+	listen func(network, address string) (net.Listener, error),
+	serve func(addr string, handler http.Handler) error,
+	serveTLS func(addr, certFile, keyFile string, handler http.Handler) error,
+) int {
+	slog.SetDefault(slog.New(slog.NewTextHandler(stdout, nil)))
+
+	if err := loadServerConfig(loadConfig); err != nil {
 		slog.Error("failed to load config", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
 	portAlloc = tunnel.NewPortAllocator(cfg.PortRangeStart, cfg.PortRangeEnd)
 
 	stop := make(chan struct{})
 
-	if err := startControlPlane(stop, net.Listen); err != nil {
+	if err := startControlPlane(stop, listen); err != nil {
 		slog.Error("failed to start TCP listener", "error", err)
-		os.Exit(1)
+		return 1
 	}
 
-	adminErrs := startAdminServer(stop, http.ListenAndServe)
-	publicErrs := startPublicServer(stop, http.ListenAndServe, http.ListenAndServeTLS)
+	adminErrs := startAdminServer(stop, serve)
+	publicErrs := startPublicServer(stop, serve, serveTLS)
 
 	select {
 	case err := <-adminErrs:
 		if err != nil {
 			slog.Error("admin server failed", "error", err)
-			os.Exit(1)
+			return 1
 		}
 	case err := <-publicErrs:
 		if err != nil {
@@ -59,9 +78,10 @@ func main() {
 			} else {
 				slog.Error("HTTP server failed", "error", err)
 			}
-			os.Exit(1)
+			return 1
 		}
 	}
+	return 0
 }
 
 func loadServerConfig(loadConfig func() (*config.ServerConfig, error)) error {

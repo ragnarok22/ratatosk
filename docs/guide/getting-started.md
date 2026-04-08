@@ -46,6 +46,53 @@ If you omit the `--port` flag, Ratatosk defaults to port 3000:
 ratatosk
 ```
 
+## TCP Tunnels
+
+Expose local TCP services like SSH, databases, or any other TCP-based protocol:
+
+```sh
+ratatosk tcp 22
+```
+
+The relay server allocates a public port and forwards raw TCP traffic:
+
+```
+Ratatosk                        (Ctrl+C to quit)
+
+Forwarding      relay.example.com:15432 -> localhost:22 (tcp)
+```
+
+Common use cases:
+
+```sh
+ratatosk tcp 22            # SSH
+ratatosk tcp 5432          # PostgreSQL
+ratatosk tcp 3306          # MySQL
+ratatosk tcp 6379          # Redis
+```
+
+Use `--server` to point at a remote relay:
+
+```sh
+ratatosk tcp 22 --server tunnel.example.com:7000
+```
+
+## UDP Tunnels
+
+Expose local UDP services like game servers:
+
+```sh
+ratatosk udp 25565
+```
+
+```
+Ratatosk                        (Ctrl+C to quit)
+
+Forwarding      relay.example.com:18200 -> localhost:25565 (udp)
+```
+
+UDP datagrams are framed over the yamux TCP connection, preserving message boundaries. Each remote client gets its own multiplexed stream with automatic idle cleanup (60s timeout).
+
 ## Protect with Basic Auth
 
 If you don't want your tunnel to be publicly accessible, add `--basic-auth` to require a username and password:

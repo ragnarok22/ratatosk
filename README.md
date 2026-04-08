@@ -20,19 +20,23 @@
 > [!WARNING]
 > Ratatosk is currently in alpha. Expect rough edges and frequent breaking changes while the core architecture, APIs, and workflows are still being stabilized.
 
-Open-source, self-hosted reverse proxy and tunneling tool. A free alternative to ngrok. Expose local web servers to the internet securely, bypassing NAT and local firewalls.
+Open-source, self-hosted reverse proxy and tunneling tool. A free alternative to ngrok. Expose local web servers, TCP services, and UDP endpoints to the internet securely, bypassing NAT and local firewalls.
 
 ## Install the Server
 
-The relay server runs on a public VPS. It accepts CLI client connections and routes public HTTP traffic to the correct tunnel.
+The relay server runs on a public VPS. It accepts CLI client connections and routes public HTTP, TCP, and UDP traffic to the correct tunnel.
 
 ### Docker (recommended)
 
 ```sh
 docker run -d --name ratatosk \
   -p 7000:7000 -p 8080:8080 -p 8081:8081 \
+  -p 10000-20000:10000-20000 \
   ghcr.io/ragnarok22/ratatosk-server
 ```
+
+> [!TIP]
+> The `10000-20000` range is for TCP/UDP tunnels. If you only use HTTP tunnels, you can omit it.
 
 To pass a config file:
 
@@ -61,6 +65,7 @@ The server runs out of the box with sane defaults — no config file required.
 | `7000` | TCP control plane (CLI client connections) |
 | `8080` | Public HTTP(S) proxy |
 | `8081` | Admin dashboard and API |
+| `10000-20000` | Dynamic port range for TCP/UDP tunnels |
 
 ### Config File
 
@@ -84,6 +89,8 @@ control_port: 7000           # TCP control plane port
 tls_enabled: false           # Enable TLS on the public proxy
 tls_cert_file: ""            # Path to TLS certificate (PEM)
 tls_key_file: ""             # Path to TLS private key (PEM)
+port_range_start: 10000      # Start of dynamic port range for TCP/UDP tunnels
+port_range_end: 20000        # End of dynamic port range (exclusive)
 ```
 
 ### Environment Variables
@@ -99,6 +106,8 @@ Every option can be set via environment variables with the `RATATOSK_` prefix. E
 | `RATATOSK_TLS_ENABLED` | `false` | Enable TLS on the public proxy |
 | `RATATOSK_TLS_CERT_FILE` | | Path to TLS certificate (PEM) |
 | `RATATOSK_TLS_KEY_FILE` | | Path to TLS private key (PEM) |
+| `RATATOSK_PORT_RANGE_START` | `10000` | Start of dynamic port range for TCP/UDP tunnels |
+| `RATATOSK_PORT_RANGE_END` | `20000` | End of dynamic port range (exclusive) |
 
 ## Install the CLI
 
@@ -144,8 +153,10 @@ sudo cp bin/cli /usr/local/bin/ratatosk
 
 | Command | Description |
 |---------|-------------|
+| `ratatosk --port <port>` | Expose a local HTTP service (default: 3000) |
+| `ratatosk tcp <port>` | Expose a local TCP service (e.g., SSH, PostgreSQL) |
+| `ratatosk udp <port>` | Expose a local UDP service (e.g., game servers) |
 | `ratatosk --server host:port` | Connect to a specific relay server (default: `localhost:7000`) |
-| `ratatosk --port <port>` | Expose a local service (default: 3000) |
 | `ratatosk --basic-auth user:pass` | Require HTTP Basic Auth for tunnel visitors |
 | `ratatosk --streamer` | Enable streamer mode (redact sensitive data from output) |
 | `ratatosk version` | Print the CLI version |
@@ -171,6 +182,44 @@ Web Interface   http://127.0.0.1:4300
 ```
 
 The web interface provides a local traffic inspector for monitoring requests and responses flowing through the tunnel.
+
+### TCP Tunnels
+
+Expose local TCP services like SSH or databases:
+
+```sh
+ratatosk tcp 22
+```
+
+```
+Ratatosk                        (Ctrl+C to quit)
+
+Forwarding      relay.example.com:15432 -> localhost:22 (tcp)
+```
+
+The relay server allocates a public port from its dynamic range (default 10000-20000) and forwards raw TCP traffic to your local service. Common use cases:
+
+```sh
+ratatosk tcp 22            # SSH
+ratatosk tcp 5432          # PostgreSQL
+ratatosk tcp 3306          # MySQL
+```
+
+### UDP Tunnels
+
+Expose local UDP services like game servers:
+
+```sh
+ratatosk udp 25565
+```
+
+```
+Ratatosk                        (Ctrl+C to quit)
+
+Forwarding      relay.example.com:18200 -> localhost:25565 (udp)
+```
+
+UDP datagrams are framed over the yamux TCP connection, preserving message boundaries. Each remote client gets its own multiplexed stream with automatic idle cleanup.
 
 ### Basic Auth
 
@@ -336,7 +385,7 @@ ratatosk/
 │   ├── config/            # Configuration manager (viper)
 │   ├── inspector/         # Traffic monitoring and logging
 │   ├── redact/            # Streamer mode sensitive data redaction
-│   ├── tunnel/            # TCP multiplexing (yamux)
+│   ├── tunnel/            # TCP multiplexing (yamux), TCP/UDP proxy, port allocation
 │   └── protocol/          # Message formats for server-client communication
 ├── deploy/                # Systemd, Docker, and example config
 ├── Makefile
@@ -347,8 +396,9 @@ ratatosk/
 ## How It Works
 
 1. The CLI client dials the Relay Server over TCP and wraps the connection in a [yamux](https://github.com/hashicorp/yamux) multiplexed session.
-2. Multiple logical streams run over this single TCP connection — no extra ports needed on the local router.
-3. The Relay Server accepts public HTTP traffic and routes it through the appropriate yamux stream back to the client, which forwards it to your local service.
+2. Multiple logical streams run over this single TCP connection -- no extra ports needed on the local router.
+3. For **HTTP tunnels**, the Relay Server routes public traffic by subdomain through yamux streams back to the client.
+4. For **TCP/UDP tunnels**, the Relay Server allocates a public port, accepts connections on it, and relays traffic through yamux streams. UDP datagrams are length-prefixed to preserve message boundaries.
 
 ## Community
 

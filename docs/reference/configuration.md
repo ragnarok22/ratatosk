@@ -26,6 +26,8 @@ control_port: 7000           # TCP control plane port
 tls_enabled: false           # Enable TLS on the public proxy
 tls_cert_file: ""            # Path to TLS certificate (PEM)
 tls_key_file: ""             # Path to TLS private key (PEM)
+port_range_start: 10000      # Start of dynamic port range for TCP/UDP tunnels
+port_range_end: 20000        # End of dynamic port range (exclusive)
 ```
 
 ## Environment Variables
@@ -41,6 +43,8 @@ Every option can be set via environment variables with the `RATATOSK_` prefix. E
 | `RATATOSK_TLS_ENABLED` | `false` | Enable TLS on the public proxy |
 | `RATATOSK_TLS_CERT_FILE` | | Path to TLS certificate (PEM) |
 | `RATATOSK_TLS_KEY_FILE` | | Path to TLS private key (PEM) |
+| `RATATOSK_PORT_RANGE_START` | `10000` | Start of dynamic port range for TCP/UDP tunnels |
+| `RATATOSK_PORT_RANGE_END` | `20000` | End of dynamic port range (exclusive) |
 
 ## Ports
 
@@ -49,6 +53,9 @@ Every option can be set via environment variables with the `RATATOSK_` prefix. E
 | `7000` | TCP control plane (CLI client connections) |
 | `8080` | Public HTTP(S) proxy |
 | `8081` | Admin dashboard and API |
+| `10000-20000` | Dynamic port range for TCP/UDP tunnels |
+
+The TCP/UDP port range is configurable via `port_range_start` and `port_range_end`. When a client requests a TCP or UDP tunnel, the server randomly allocates a port from this range. Make sure these ports are open in your firewall if you use TCP/UDP tunnels.
 
 ## TLS Configuration
 
