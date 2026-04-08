@@ -141,6 +141,7 @@ func TestLoadConfigSearchPathAndPrecedence(t *testing.T) {
 		wantPublicPort  int
 		wantAdminPort   int
 		wantControlPort int
+		wantTLSEnabled  bool
 	}{
 		{
 			name: "loads from home directory config path",
@@ -148,11 +149,13 @@ func TestLoadConfigSearchPathAndPrecedence(t *testing.T) {
 public_port: 9443
 admin_port: 9092
 control_port: 7100
+tls_enabled: true
 `,
 			wantBaseDomain:  "home.tunnel.dev",
 			wantPublicPort:  9443,
 			wantAdminPort:   9092,
 			wantControlPort: 7100,
+			wantTLSEnabled:  true,
 		},
 		{
 			name: "environment variables override file values",
@@ -160,15 +163,18 @@ control_port: 7100
 public_port: 8088
 admin_port: 8089
 control_port: 7099
+tls_enabled: false
 `,
 			env: map[string]string{
 				"RATATOSK_BASE_DOMAIN": "env.tunnel.dev",
 				"RATATOSK_PUBLIC_PORT": "443",
+				"RATATOSK_TLS_ENABLED": "true",
 			},
 			wantBaseDomain:  "env.tunnel.dev",
 			wantPublicPort:  443,
 			wantAdminPort:   8089,
 			wantControlPort: 7099,
+			wantTLSEnabled:  true,
 		},
 	}
 
@@ -223,6 +229,9 @@ control_port: 7099
 			}
 			if cfg.ControlPort != tt.wantControlPort {
 				t.Errorf("ControlPort = %d, want %d", cfg.ControlPort, tt.wantControlPort)
+			}
+			if cfg.TLSEnabled != tt.wantTLSEnabled {
+				t.Errorf("TLSEnabled = %t, want %t", cfg.TLSEnabled, tt.wantTLSEnabled)
 			}
 		})
 	}
