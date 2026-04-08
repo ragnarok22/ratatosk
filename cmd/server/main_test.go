@@ -20,6 +20,16 @@ import (
 	"ratatosk/internal/tunnel"
 )
 
+type failingReadCloser struct{}
+
+func (failingReadCloser) Read([]byte) (int, error) {
+	return 0, errors.New("read failed")
+}
+
+func (failingReadCloser) Close() error {
+	return nil
+}
+
 func TestLoadServerConfig(t *testing.T) {
 	oldCfg := cfg
 	t.Cleanup(func() { cfg = oldCfg })
@@ -144,6 +154,21 @@ func TestStartAdminServer(t *testing.T) {
 	}
 }
 
+func TestStartAdminServerReturnsServeError(t *testing.T) {
+	oldCfg := cfg
+	cfg = &config.ServerConfig{AdminPort: 8081}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	wantErr := errors.New("admin failed")
+	errs := startAdminServer(make(chan struct{}), func(addr string, handler http.Handler) error {
+		return wantErr
+	})
+
+	if err := <-errs; !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+}
+
 func TestStartPublicServerHTTP(t *testing.T) {
 	oldCfg := cfg
 	cfg = &config.ServerConfig{BaseDomain: "localhost", PublicPort: 8080}
@@ -186,6 +211,26 @@ func TestStartPublicServerHTTP(t *testing.T) {
 	close(stop)
 	if err := <-errs; err != nil {
 		t.Fatalf("public HTTP error = %v, want nil", err)
+	}
+}
+
+func TestStartPublicServerHTTPReturnsServeError(t *testing.T) {
+	oldCfg := cfg
+	cfg = &config.ServerConfig{BaseDomain: "localhost", PublicPort: 8080}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	wantErr := errors.New("http failed")
+	errs := startPublicServer(
+		make(chan struct{}),
+		func(addr string, handler http.Handler) error { return wantErr },
+		func(string, string, string, http.Handler) error {
+			t.Fatal("serveTLS should not be called")
+			return nil
+		},
+	)
+
+	if err := <-errs; !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
 	}
 }
 
@@ -266,6 +311,67 @@ func TestStartPublicServerHTTPS(t *testing.T) {
 	close(stop)
 	if err := <-errs; err != nil {
 		t.Fatalf("public HTTPS error = %v, want nil", err)
+	}
+}
+
+func TestStartPublicServerHTTPSReturnsServeTLSError(t *testing.T) {
+	oldCfg := cfg
+	cfg = &config.ServerConfig{
+		BaseDomain:  "localhost",
+		PublicPort:  443,
+		TLSEnabled:  true,
+		TLSCertFile: "cert.pem",
+		TLSKeyFile:  "key.pem",
+	}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	redirectCalled := make(chan struct{})
+	wantErr := errors.New("https failed")
+
+	errs := startPublicServer(
+		make(chan struct{}),
+		func(addr string, handler http.Handler) error {
+			close(redirectCalled)
+			return nil
+		},
+		func(addr, certFile, keyFile string, handler http.Handler) error {
+			<-redirectCalled
+			return wantErr
+		},
+	)
+
+	if err := <-errs; !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+}
+
+func TestStartPublicServerHTTPSRedirectError(t *testing.T) {
+	oldCfg := cfg
+	cfg = &config.ServerConfig{
+		BaseDomain:  "localhost",
+		PublicPort:  443,
+		TLSEnabled:  true,
+		TLSCertFile: "cert.pem",
+		TLSKeyFile:  "key.pem",
+	}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	redirectCalled := make(chan struct{})
+
+	errs := startPublicServer(
+		make(chan struct{}),
+		func(addr string, handler http.Handler) error {
+			close(redirectCalled)
+			return errors.New("redirect failed")
+		},
+		func(addr, certFile, keyFile string, handler http.Handler) error {
+			<-redirectCalled
+			return nil
+		},
+	)
+
+	if err := <-errs; err != nil {
+		t.Fatalf("err = %v, want nil", err)
 	}
 }
 
@@ -635,6 +741,21 @@ func TestAdminDashboardFallback(t *testing.T) {
 	}
 }
 
+func TestAdminDashboardSubErrorFallback(t *testing.T) {
+	handler := newAdminHandlerFS(registry, fstest.MapFS{})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Dashboard not built. Run: make build") {
+		t.Fatalf("body = %q, want dashboard placeholder", w.Body.String())
+	}
+}
+
 func TestAdminDashboardEmbeddedFS(t *testing.T) {
 	handler := newAdminHandlerFS(registry, fstest.MapFS{
 		"dashboard/dist/index.html":     {Data: []byte("<html>dashboard</html>")},
@@ -824,6 +945,47 @@ func TestProxyRequestSessionClosed(t *testing.T) {
 
 	if proxyRequest(req, "closed", serverSession, dummyConn) {
 		t.Error("expected proxyRequest to return false when session is closed")
+	}
+}
+
+func TestProxyRequestWriteError(t *testing.T) {
+	clientPipe, serverPipe := net.Pipe()
+	serverSession, err := tunnel.NewServerSession(serverPipe)
+	if err != nil {
+		t.Fatalf("NewServerSession: %v", err)
+	}
+	clientSession, err := tunnel.NewClientSession(clientPipe)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+	t.Cleanup(func() {
+		clientSession.Close()
+		serverSession.Close()
+		clientPipe.Close()
+		serverPipe.Close()
+	})
+
+	go func() {
+		stream, err := clientSession.Accept()
+		if err != nil {
+			return
+		}
+		defer stream.Close()
+		io.Copy(io.Discard, stream)
+	}()
+
+	req, err := http.NewRequest(http.MethodPost, "http://example.com/upload", failingReadCloser{})
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.ContentLength = 1
+
+	dummyConn, dummyPeer := net.Pipe()
+	defer dummyConn.Close()
+	defer dummyPeer.Close()
+
+	if proxyRequest(req, "broken", serverSession, dummyConn) {
+		t.Fatal("expected proxyRequest to return false when request write fails")
 	}
 }
 
@@ -1137,6 +1299,51 @@ func TestWriteRaw401(t *testing.T) {
 	}
 
 	<-done
+}
+
+func TestHTTPProxyKeepAliveBasicAuthRejected(t *testing.T) {
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "ok")
+	}))
+	defer local.Close()
+
+	setupTunnelWithAuth(t, "auth-keepalive", local.Listener.Addr().String(), "admin:secret")
+	proxyAddr := startProxyServer(t)
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	reader := bufio.NewReader(conn)
+
+	fmt.Fprintf(conn, "GET /page HTTP/1.1\r\nHost: auth-keepalive.localhost:8080\r\nAuthorization: Basic YWRtaW46c2VjcmV0\r\n\r\n")
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("request 1: ReadResponse: %v", err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	fmt.Fprintf(conn, "GET /script.js HTTP/1.1\r\nHost: auth-keepalive.localhost:8080\r\n\r\n")
+	resp2, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("request 2: ReadResponse: %v", err)
+	}
+	body, err := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if err != nil {
+		t.Fatalf("request 2: ReadAll: %v", err)
+	}
+
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("request 2: status = %d, want %d", resp2.StatusCode, http.StatusUnauthorized)
+	}
+	if string(body) != "Unauthorized" {
+		t.Fatalf("request 2: body = %q, want %q", body, "Unauthorized")
+	}
 }
 
 func TestHTTPProxyBasicAuthRejected(t *testing.T) {
