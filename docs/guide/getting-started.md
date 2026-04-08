@@ -46,6 +46,16 @@ If you omit the `--port` flag, Ratatosk defaults to port 3000:
 ratatosk
 ```
 
+## Protect with Basic Auth
+
+If you don't want your tunnel to be publicly accessible, add `--basic-auth` to require a username and password:
+
+```sh
+ratatosk --port 3000 --basic-auth "admin:secret"
+```
+
+Visitors will see a browser login dialog before any traffic reaches your local service. See [CLI Commands > --basic-auth](/reference/cli-commands#basic-auth) for details.
+
 ## Streamer Mode
 
 If you are streaming, recording, or taking screenshots, add `--streamer` to redact sensitive data (IPs, tokens, file paths) from the terminal output and the traffic inspector:

@@ -13,6 +13,7 @@ ratatosk [command] [flags]
 | Command | Description |
 |---------|-------------|
 | `ratatosk --port <port>` | Expose a local service (default: 3000) |
+| `ratatosk --basic-auth user:pass` | Require HTTP Basic Auth for tunnel visitors |
 | `ratatosk --streamer` | Enable streamer mode (redact sensitive data from output) |
 | `ratatosk version` | Print the CLI version |
 | `ratatosk self-update` | Check for updates and self-update |
@@ -29,6 +30,24 @@ The local port to expose through the tunnel.
 ```sh
 ratatosk --port 8080
 ```
+
+### `--basic-auth`
+
+Require HTTP Basic Authentication for all visitors to the tunnel. The relay server intercepts requests and demands credentials before any traffic is forwarded to your local service.
+
+- **Type:** string
+- **Default:** (empty -- no auth, tunnel is public)
+- **Format:** `user:pass`
+
+```sh
+ratatosk --port 3000 --basic-auth "admin:secret"
+```
+
+When enabled, unauthenticated visitors receive a `401 Unauthorized` response with a `WWW-Authenticate: Basic realm="Ratatosk Tunnel"` header. Browsers display their native login dialog automatically.
+
+The credential is sent to the relay server during the tunnel handshake. The server enforces the check before hijacking the connection or opening a yamux stream, so unauthorized requests never consume tunnel bandwidth.
+
+Passwords containing `:` are supported (e.g. `admin:p:ass:word`). Empty passwords are also valid (e.g. `admin:`).
 
 ### `--streamer`
 
@@ -78,4 +97,16 @@ Expose the default port (3000):
 
 ```sh
 ratatosk
+```
+
+Expose a service with password protection:
+
+```sh
+ratatosk --port 8080 --basic-auth "admin:secret"
+```
+
+Combine basic auth with streamer mode:
+
+```sh
+ratatosk --port 3000 --basic-auth "admin:secret" --streamer
 ```

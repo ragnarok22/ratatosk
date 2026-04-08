@@ -145,6 +145,7 @@ sudo cp bin/cli /usr/local/bin/ratatosk
 | Command | Description |
 |---------|-------------|
 | `ratatosk --port <port>` | Expose a local service (default: 3000) |
+| `ratatosk --basic-auth user:pass` | Require HTTP Basic Auth for tunnel visitors |
 | `ratatosk --streamer` | Enable streamer mode (redact sensitive data from output) |
 | `ratatosk version` | Print the CLI version |
 | `ratatosk self-update` | Check for updates and self-update (defers to `brew upgrade` if installed via Homebrew) |
@@ -167,6 +168,24 @@ Web Interface   http://127.0.0.1:4300
 ```
 
 The web interface provides a local traffic inspector for monitoring requests and responses flowing through the tunnel.
+
+### Basic Auth
+
+Protect your tunnel with HTTP Basic Authentication. Visitors must enter credentials before any traffic reaches your local service:
+
+```sh
+ratatosk --port 3000 --basic-auth "admin:secret"
+```
+
+```
+Ratatosk                        (Ctrl+C to quit)
+
+Forwarding      http://quick-fox-1234.tunnel.example.com -> http://localhost:3000
+Basic Auth      enabled (user: admin)
+Web Interface   http://127.0.0.1:4300
+```
+
+Unauthenticated visitors receive a `401 Unauthorized` response with a `WWW-Authenticate` header, which triggers the browser's native login dialog. The relay server enforces the check before any bytes are forwarded to the tunnel.
 
 ### Streamer Mode
 
