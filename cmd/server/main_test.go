@@ -1536,6 +1536,65 @@ func TestHTTPProxyPOSTRequest(t *testing.T) {
 	}
 }
 
+// TestHTTPProxyPOSTKeepAlive verifies that a POST request with a body
+// followed by a GET on the same keep-alive connection both succeed.
+// This catches a bug where a background io.Copy goroutine in proxyRequest
+// reads from the client connection after r.Write already consumed the body,
+// stealing bytes from the next keep-alive request.
+func TestHTTPProxyPOSTKeepAlive(t *testing.T) {
+	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/plain")
+		if r.Method == "POST" {
+			fmt.Fprintf(w, "post:%s", body)
+		} else {
+			fmt.Fprintf(w, "get:%s", r.URL.Path)
+		}
+	}))
+	defer local.Close()
+
+	setupTunnel(t, "post-ka", local.Listener.Addr().String())
+	proxyAddr := startProxyServer(t)
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	reader := bufio.NewReader(conn)
+
+	// First request: POST with a body, keep-alive (default for HTTP/1.1).
+	body := "key=value"
+	fmt.Fprintf(conn, "POST /upload HTTP/1.1\r\nHost: post-ka.localhost:8080\r\nContent-Length: %d\r\n\r\n%s", len(body), body)
+
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("request 1 (POST): ReadResponse: %v", err)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if got := string(respBody); got != "post:key=value" {
+		t.Fatalf("request 1: body = %q, want %q", got, "post:key=value")
+	}
+
+	// Second request: GET on the same keep-alive connection.
+	// If the POST's background io.Copy goroutine consumed bytes from the
+	// connection, this request will be corrupted or never receive a response.
+	fmt.Fprintf(conn, "GET /next HTTP/1.1\r\nHost: post-ka.localhost:8080\r\n\r\n")
+
+	resp2, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("request 2 (GET): ReadResponse: %v (keep-alive broken after POST)", err)
+	}
+	respBody2, _ := io.ReadAll(resp2.Body)
+	resp2.Body.Close()
+	if got := string(respBody2); got != "get:/next" {
+		t.Errorf("request 2: body = %q, want %q", got, "get:/next")
+	}
+}
+
 func TestHTTPProxyKeepAliveInvalidHost(t *testing.T) {
 	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "ok")

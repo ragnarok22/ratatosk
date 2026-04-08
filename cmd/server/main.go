@@ -433,33 +433,39 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Hijack the public-facing HTTP connection to get the raw net.Conn.
-	hijacker, ok := w.(http.Hijacker)
-	if !ok {
-		slog.Error("hijacking not supported")
-		http.Error(w, "internal error", http.StatusInternalServerError)
-		return
-	}
-	clientConn, clientBuf, err := hijacker.Hijack()
+	stream, err := entry.Session.Open()
 	if err != nil {
-		slog.Error("hijack failed", "error", err)
+		slog.Error("failed to open stream", "subdomain", subdomain, "error", err)
+		http.Error(w, "tunnel error", http.StatusBadGateway)
 		return
 	}
-	defer clientConn.Close()
+	defer stream.Close()
 
-	// Unwrap TLS connection for raw writes if needed.
-	rawConn := clientConn
-	if tlsConn, ok := clientConn.(*tls.Conn); ok {
-		rawConn = tlsConn
-	}
-
-	// Proxy the first request (already parsed by net/http) and then loop
-	// to handle subsequent keep-alive requests on the same connection.
-	if !proxyRequest(r, subdomain, entry.Session, rawConn) {
+	// Write the HTTP request in wire format into the yamux stream.
+	if err := r.Write(stream); err != nil {
+		slog.Error("failed to write request to stream", "subdomain", subdomain, "error", err)
+		http.Error(w, "tunnel error", http.StatusBadGateway)
 		return
 	}
 
-	handleKeepAliveRequests(clientBuf.Reader, rawConn)
+	slog.Info("proxying request", "subdomain", subdomain, "method", r.Method, "path", r.URL.Path)
+
+	resp, err := http.ReadResponse(bufio.NewReader(stream), r)
+	if err != nil {
+		slog.Error("failed to read response from stream", "subdomain", subdomain, "error", err)
+		http.Error(w, "tunnel error", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Copy response headers from the tunnel to the client.
+	for key, vals := range resp.Header {
+		for _, v := range vals {
+			w.Header().Add(key, v)
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 // resolveHTTPTunnel extracts the subdomain from the request's Host header,
@@ -490,43 +496,6 @@ func resolveHTTPTunnel(w http.ResponseWriter, r *http.Request) (subdomain string
 	return subdomain, entry, true
 }
 
-// handleKeepAliveRequests reads subsequent HTTP requests from a hijacked
-// keep-alive connection and proxies each one through the tunnel.
-func handleKeepAliveRequests(reader *bufio.Reader, rawConn net.Conn) {
-	for {
-		req, err := http.ReadRequest(reader)
-		if err != nil {
-			return // client closed connection or malformed request
-		}
-
-		host := req.Host
-		if idx := strings.LastIndex(host, ":"); idx != -1 {
-			host = host[:idx]
-		}
-		sub := extractSubdomain(host, cfg.BaseDomain)
-		if sub == "" {
-			return
-		}
-
-		ent, ok := registry.GetEntry(sub)
-		if !ok {
-			return
-		}
-
-		if ent.BasicAuth != "" {
-			user, pass, ok := req.BasicAuth()
-			if !ok || user+":"+pass != ent.BasicAuth {
-				writeRaw401(rawConn)
-				return
-			}
-		}
-
-		if !proxyRequest(req, sub, ent.Session, rawConn) {
-			return
-		}
-	}
-}
-
 // extractSubdomain extracts the subdomain prefix from a host given a base domain.
 // For "quick-fox-1234.tunnel.example.com" with base "tunnel.example.com", returns "quick-fox-1234".
 // For "quick-fox-1234.localhost" with base "localhost", returns "quick-fox-1234".
@@ -543,46 +512,6 @@ func extractSubdomain(host, baseDomain string) string {
 	return sub
 }
 
-// proxyRequest opens a yamux stream, forwards the HTTP request through it,
-// and copies the response back to clientConn. Returns true if the connection
-// can be reused for another request (keep-alive).
-func proxyRequest(r *http.Request, subdomain string, session *yamux.Session, clientConn net.Conn) bool {
-	stream, err := session.Open()
-	if err != nil {
-		slog.Error("failed to open stream", "subdomain", subdomain, "error", err)
-		return false
-	}
-	defer stream.Close()
-
-	// Write the HTTP request in wire format into the yamux stream.
-	if err := r.Write(stream); err != nil {
-		slog.Error("failed to write request to stream", "subdomain", subdomain, "error", err)
-		return false
-	}
-
-	slog.Info("proxying request", "subdomain", subdomain, "method", r.Method, "path", r.URL.Path)
-
-	// For requests with a body (POST, PUT, etc.), copy remaining data
-	// from the browser to the stream in the background.
-	if r.ContentLength > 0 || r.TransferEncoding != nil {
-		go io.Copy(stream, clientConn)
-	}
-
-	// Copy the response from the yamux stream back to the browser.
-	// When the CLI finishes writing the response and closes the stream,
-	// this returns with EOF.
-	resp, err := http.ReadResponse(bufio.NewReader(stream), r)
-	if err != nil {
-		slog.Error("failed to read response from stream", "subdomain", subdomain, "error", err)
-		return false
-	}
-	defer resp.Body.Close()
-
-	// Write the response back to the browser in wire format.
-	err = resp.Write(clientConn)
-	return err == nil
-}
-
 // checkBasicAuth validates the request's Authorization header against the
 // expected "user:pass" credential. Returns true if auth passes (or no auth
 // is required). Writes a 401 response and returns false if auth fails.
@@ -597,24 +526,6 @@ func checkBasicAuth(w http.ResponseWriter, r *http.Request, expected string) boo
 		return false
 	}
 	return true
-}
-
-// writeRaw401 writes a raw HTTP/1.1 401 response with WWW-Authenticate header
-// to a hijacked connection.
-func writeRaw401(conn net.Conn) {
-	body := "Unauthorized"
-	resp := &http.Response{
-		StatusCode: http.StatusUnauthorized,
-		ProtoMajor: 1,
-		ProtoMinor: 1,
-		Header: http.Header{
-			"WWW-Authenticate": {`Basic realm="Ratatosk Tunnel"`},
-			"Content-Type":     {"text/plain"},
-		},
-		Body:          io.NopCloser(strings.NewReader(body)),
-		ContentLength: int64(len(body)),
-	}
-	resp.Write(conn)
 }
 
 // timeNow is a seam for testing.
