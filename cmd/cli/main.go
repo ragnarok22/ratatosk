@@ -7,8 +7,8 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"sync"
 
+	"ratatosk/internal/inspector"
 	"ratatosk/internal/protocol"
 	"ratatosk/internal/tunnel"
 )
@@ -60,10 +60,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	logger := inspector.NewLogger()
+	inspectorAddr, inspectorErr := inspector.StartServer(logger)
+
 	fmt.Println()
 	fmt.Println("Ratatosk                        (Ctrl+C to quit)")
 	fmt.Println()
-	fmt.Printf("Forwarding  http://%s.localhost:8080 -> http://localhost:%d\n", resp.Subdomain, *port)
+	fmt.Printf("Forwarding      http://%s.localhost:8080 -> http://localhost:%d\n", resp.Subdomain, *port)
+	if inspectorErr != nil {
+		slog.Warn("failed to start inspector", "error", inspectorErr)
+	} else {
+		fmt.Printf("Web Interface   http://%s\n", inspectorAddr)
+	}
 	fmt.Println()
 
 	for {
@@ -76,37 +84,11 @@ func main() {
 			}
 			return
 		}
-		go handleStream(stream, localAddr)
+		go handleStream(stream, localAddr, logger)
 	}
 }
 
-func handleStream(stream net.Conn, localAddr string) {
+func handleStream(stream net.Conn, localAddr string, logger *inspector.Logger) {
 	defer stream.Close()
-
-	local, err := net.Dial("tcp", localAddr)
-	if err != nil {
-		slog.Error("failed to connect to local server", "addr", localAddr, "error", err)
-		return
-	}
-	defer local.Close()
-
-	slog.Info("forwarding request", "addr", localAddr)
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-
-	// Forward HTTP request from tunnel to local server.
-	go func() {
-		defer wg.Done()
-		io.Copy(local, stream)
-	}()
-
-	// Forward HTTP response from local server back through tunnel.
-	go func() {
-		defer wg.Done()
-		io.Copy(stream, local)
-	}()
-
-	wg.Wait()
-	slog.Info("request completed")
+	inspector.HandleStream(stream, localAddr, logger)
 }
