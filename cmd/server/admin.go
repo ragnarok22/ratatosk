@@ -14,6 +14,10 @@ type tunnelsResponse struct {
 }
 
 func newAdminHandler(reg *tunnel.Registry) http.Handler {
+	return newAdminHandlerFS(reg, dashboardFS)
+}
+
+func newAdminHandlerFS(reg *tunnel.Registry, dashboard fs.FS) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/tunnels", func(w http.ResponseWriter, r *http.Request) {
@@ -22,7 +26,7 @@ func newAdminHandler(reg *tunnel.Registry) http.Handler {
 	})
 
 	// Serve the embedded SPA, or a placeholder if the dist was not built.
-	sub, err := fs.Sub(dashboardFS, "dashboard/dist")
+	sub, err := fs.Sub(dashboard, "dashboard/dist")
 	if err != nil {
 		mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Content-Type", "text/plain")

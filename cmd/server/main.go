@@ -25,13 +25,46 @@ var (
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
 
-	var err error
-	cfg, err = config.LoadConfig()
-	if err != nil {
+	if err := loadServerConfig(config.LoadConfig); err != nil {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
 
+	stop := make(chan struct{})
+
+	if err := startControlPlane(stop, net.Listen); err != nil {
+		slog.Error("failed to start TCP listener", "error", err)
+		os.Exit(1)
+	}
+
+	adminErrs := startAdminServer(stop, http.ListenAndServe)
+	publicErrs := startPublicServer(stop, http.ListenAndServe, http.ListenAndServeTLS)
+
+	select {
+	case err := <-adminErrs:
+		if err != nil {
+			slog.Error("admin server failed", "error", err)
+			os.Exit(1)
+		}
+	case err := <-publicErrs:
+		if err != nil {
+			if cfg.TLSEnabled {
+				slog.Error("HTTPS server failed", "error", err)
+			} else {
+				slog.Error("HTTP server failed", "error", err)
+			}
+			os.Exit(1)
+		}
+	}
+}
+
+func loadServerConfig(loadConfig func() (*config.ServerConfig, error)) error {
+	loaded, err := loadConfig()
+	if err != nil {
+		return err
+	}
+
+	cfg = loaded
 	slog.Info("configuration loaded",
 		"base_domain", cfg.BaseDomain,
 		"public_port", cfg.PublicPort,
@@ -39,19 +72,33 @@ func main() {
 		"control_port", cfg.ControlPort,
 		"tls", cfg.TLSEnabled,
 	)
+	return nil
+}
 
-	// Start the TCP control plane listener.
+func startControlPlane(
+	stop <-chan struct{},
+	listen func(network, address string) (net.Listener, error),
+) error {
+	ln, err := listen("tcp", cfg.ControlAddr())
+	if err != nil {
+		return err
+	}
+	slog.Info("control plane listening", "addr", cfg.ControlAddr())
+
 	go func() {
-		ln, err := net.Listen("tcp", cfg.ControlAddr())
-		if err != nil {
-			slog.Error("failed to start TCP listener", "error", err)
-			os.Exit(1)
-		}
-		slog.Info("control plane listening", "addr", cfg.ControlAddr())
+		<-stop
+		ln.Close()
+	}()
 
+	go func() {
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
+				select {
+				case <-stop:
+					return
+				default:
+				}
 				slog.Error("failed to accept connection", "error", err)
 				continue
 			}
@@ -59,20 +106,40 @@ func main() {
 		}
 	}()
 
-	// Start the admin dashboard server.
+	return nil
+}
+
+func startAdminServer(
+	stop <-chan struct{},
+	serve func(addr string, handler http.Handler) error,
+) <-chan error {
+	errs := make(chan error, 1)
+
+	adminHandler := newAdminHandler(registry)
+	slog.Info("admin dashboard listening", "addr", cfg.AdminAddr())
+
 	go func() {
-		adminHandler := newAdminHandler(registry)
-		slog.Info("admin dashboard listening", "addr", cfg.AdminAddr())
-		if err := http.ListenAndServe(cfg.AdminAddr(), adminHandler); err != nil {
-			slog.Error("admin server failed", "error", err)
-			os.Exit(1)
+		err := serve(cfg.AdminAddr(), adminHandler)
+		select {
+		case <-stop:
+			errs <- nil
+		default:
+			errs <- err
 		}
 	}()
 
-	// Start the public HTTP(S) server.
-	go func() {
-		handler := http.HandlerFunc(handleHTTP)
+	return errs
+}
 
+func startPublicServer(
+	stop <-chan struct{},
+	serve func(addr string, handler http.Handler) error,
+	serveTLS func(addr, certFile, keyFile string, handler http.Handler) error,
+) <-chan error {
+	errs := make(chan error, 1)
+	handler := http.HandlerFunc(handleHTTP)
+
+	go func() {
 		if cfg.TLSEnabled {
 			// Start HTTP->HTTPS redirect on port 80.
 			go func() {
@@ -81,27 +148,37 @@ func main() {
 					http.Redirect(w, r, target, http.StatusMovedPermanently)
 				})
 				slog.Info("HTTP redirect server listening", "addr", ":80")
-				if err := http.ListenAndServe(":80", redirect); err != nil {
-					slog.Error("HTTP redirect server failed", "error", err)
+				if err := serve(":80", redirect); err != nil {
+					select {
+					case <-stop:
+					default:
+						slog.Error("HTTP redirect server failed", "error", err)
+					}
 				}
 			}()
 
 			slog.Info("public HTTPS server listening", "addr", cfg.PublicAddr())
-			if err := http.ListenAndServeTLS(cfg.PublicAddr(), cfg.TLSCertFile, cfg.TLSKeyFile, handler); err != nil {
-				slog.Error("HTTPS server failed", "error", err)
-				os.Exit(1)
+			err := serveTLS(cfg.PublicAddr(), cfg.TLSCertFile, cfg.TLSKeyFile, handler)
+			select {
+			case <-stop:
+				errs <- nil
+			default:
+				errs <- err
 			}
-		} else {
-			slog.Info("public HTTP server listening", "addr", cfg.PublicAddr())
-			if err := http.ListenAndServe(cfg.PublicAddr(), handler); err != nil {
-				slog.Error("HTTP server failed", "error", err)
-				os.Exit(1)
-			}
+			return
+		}
+
+		slog.Info("public HTTP server listening", "addr", cfg.PublicAddr())
+		err := serve(cfg.PublicAddr(), handler)
+		select {
+		case <-stop:
+			errs <- nil
+		default:
+			errs <- err
 		}
 	}()
 
-	// Block forever.
-	select {}
+	return errs
 }
 
 func handleConnection(conn net.Conn) {

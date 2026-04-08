@@ -19,42 +19,60 @@ import (
 var Version = "dev"
 
 func main() {
-	if len(os.Args) > 1 {
-		switch os.Args[1] {
+	if code := run(os.Args, os.Getenv, os.Stdout, os.Stderr, updater.UpdateCLI, runClient); code != 0 {
+		os.Exit(code)
+	}
+}
+
+func run(
+	args []string,
+	getenv func(string) string,
+	stdout, stderr io.Writer,
+	updateCLI func(string) error,
+	runClientFn func(string, int, string) error,
+) int {
+	if len(args) > 1 {
+		switch args[1] {
 		case "version":
-			fmt.Printf("Ratatosk CLI version: %s\n", Version)
-			return
+			fmt.Fprintf(stdout, "Ratatosk CLI version: %s\n", Version)
+			return 0
 		case "self-update":
-			if err := updater.UpdateCLI(Version); err != nil {
+			if err := updateCLI(Version); err != nil {
 				slog.Error("update failed", "error", err)
-				os.Exit(1)
+				return 1
 			}
-			return
+			return 0
 		}
 	}
 
-	server := flag.String("server", "localhost:7000", "relay server address (host:port)")
-	port := flag.Int("port", 3000, "local port to expose")
-	streamer := flag.Bool("streamer", false, "redact sensitive data from output for streaming")
-	basicAuth := flag.String("basic-auth", "", "require basic auth for tunnel visitors (format: user:pass)")
-	flag.Parse()
+	flags := flag.NewFlagSet(args[0], flag.ContinueOnError)
+	flags.SetOutput(stderr)
 
-	if env := os.Getenv("RATATOSK_SERVER"); env != "" && *server == "localhost:7000" {
+	server := flags.String("server", "localhost:7000", "relay server address (host:port)")
+	port := flags.Int("port", 3000, "local port to expose")
+	streamer := flags.Bool("streamer", false, "redact sensitive data from output for streaming")
+	basicAuth := flags.String("basic-auth", "", "require basic auth for tunnel visitors (format: user:pass)")
+	if err := flags.Parse(args[1:]); err != nil {
+		return 2
+	}
+
+	if env := getenv("RATATOSK_SERVER"); env != "" && *server == "localhost:7000" {
 		*server = env
 	}
 
 	if *basicAuth != "" && !strings.Contains(*basicAuth, ":") {
-		fmt.Fprintf(os.Stderr, "Error: --basic-auth must be in 'user:pass' format\n")
-		os.Exit(1)
+		fmt.Fprintf(stderr, "Error: --basic-auth must be in 'user:pass' format\n")
+		return 1
 	}
 
 	redact.Enabled = *streamer
-	slog.SetDefault(slog.New(redact.NewHandler(slog.NewTextHandler(os.Stdout, nil))))
+	slog.SetDefault(slog.New(redact.NewHandler(slog.NewTextHandler(stdout, nil))))
 
-	if err := runClient(*server, *port, *basicAuth); err != nil {
+	if err := runClientFn(*server, *port, *basicAuth); err != nil {
 		slog.Error("client error", "error", err)
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
 
 func runClient(serverAddr string, localPort int, basicAuth string) error {

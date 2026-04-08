@@ -3,7 +3,9 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +36,252 @@ func startMockRelay(t *testing.T, handler func(net.Conn)) string {
 		handler(conn)
 	}()
 	return ln.Addr().String()
+}
+
+func TestRunVersionCommand(t *testing.T) {
+	oldLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := run(
+		[]string{"ratatosk", "version"},
+		func(string) string { return "" },
+		&stdout,
+		&stderr,
+		func(string) error {
+			t.Fatal("updateCLI should not be called")
+			return nil
+		},
+		func(string, int, string) error {
+			t.Fatal("runClient should not be called")
+			return nil
+		},
+	)
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0", code)
+	}
+	if got := stdout.String(); !strings.Contains(got, "Ratatosk CLI version:") {
+		t.Fatalf("stdout = %q, want version output", got)
+	}
+	if stderr.Len() != 0 {
+		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunSelfUpdateCommand(t *testing.T) {
+	oldLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	t.Run("success", func(t *testing.T) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+		called := false
+
+		code := run(
+			[]string{"ratatosk", "self-update"},
+			func(string) string { return "" },
+			&stdout,
+			&stderr,
+			func(version string) error {
+				called = true
+				if version != Version {
+					t.Fatalf("version = %q, want %q", version, Version)
+				}
+				return nil
+			},
+			func(string, int, string) error {
+				t.Fatal("runClient should not be called")
+				return nil
+			},
+		)
+
+		if code != 0 {
+			t.Fatalf("code = %d, want 0", code)
+		}
+		if !called {
+			t.Fatal("updateCLI was not called")
+		}
+	})
+
+	t.Run("failure", func(t *testing.T) {
+		var stdout bytes.Buffer
+		var stderr bytes.Buffer
+
+		code := run(
+			[]string{"ratatosk", "self-update"},
+			func(string) string { return "" },
+			&stdout,
+			&stderr,
+			func(string) error { return errors.New("boom") },
+			func(string, int, string) error {
+				t.Fatal("runClient should not be called")
+				return nil
+			},
+		)
+
+		if code != 1 {
+			t.Fatalf("code = %d, want 1", code)
+		}
+	})
+}
+
+func TestRunUsesEnvOverride(t *testing.T) {
+	oldLogger := slog.Default()
+	oldRedact := redact.Enabled
+	t.Cleanup(func() {
+		slog.SetDefault(oldLogger)
+		redact.Enabled = oldRedact
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	var gotServer string
+	var gotPort int
+	var gotAuth string
+
+	code := run(
+		[]string{"ratatosk", "-port", "4567", "-basic-auth", "admin:secret"},
+		func(key string) string {
+			if key == "RATATOSK_SERVER" {
+				return "relay.example:7000"
+			}
+			return ""
+		},
+		&stdout,
+		&stderr,
+		func(string) error {
+			t.Fatal("updateCLI should not be called")
+			return nil
+		},
+		func(server string, port int, basicAuth string) error {
+			gotServer = server
+			gotPort = port
+			gotAuth = basicAuth
+			return nil
+		},
+	)
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0", code)
+	}
+	if gotServer != "relay.example:7000" {
+		t.Fatalf("server = %q, want %q", gotServer, "relay.example:7000")
+	}
+	if gotPort != 4567 {
+		t.Fatalf("port = %d, want 4567", gotPort)
+	}
+	if gotAuth != "admin:secret" {
+		t.Fatalf("basicAuth = %q, want %q", gotAuth, "admin:secret")
+	}
+}
+
+func TestRunExplicitServerBeatsEnvOverride(t *testing.T) {
+	oldLogger := slog.Default()
+	oldRedact := redact.Enabled
+	t.Cleanup(func() {
+		slog.SetDefault(oldLogger)
+		redact.Enabled = oldRedact
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	var gotServer string
+
+	code := run(
+		[]string{"ratatosk", "-server", "manual.example:1234"},
+		func(key string) string {
+			if key == "RATATOSK_SERVER" {
+				return "relay.example:7000"
+			}
+			return ""
+		},
+		&stdout,
+		&stderr,
+		func(string) error {
+			t.Fatal("updateCLI should not be called")
+			return nil
+		},
+		func(server string, port int, basicAuth string) error {
+			gotServer = server
+			return nil
+		},
+	)
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0", code)
+	}
+	if gotServer != "manual.example:1234" {
+		t.Fatalf("server = %q, want %q", gotServer, "manual.example:1234")
+	}
+}
+
+func TestRunRejectsInvalidBasicAuth(t *testing.T) {
+	oldLogger := slog.Default()
+	oldRedact := redact.Enabled
+	t.Cleanup(func() {
+		slog.SetDefault(oldLogger)
+		redact.Enabled = oldRedact
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := run(
+		[]string{"ratatosk", "-basic-auth", "not-valid"},
+		func(string) string { return "" },
+		&stdout,
+		&stderr,
+		func(string) error {
+			t.Fatal("updateCLI should not be called")
+			return nil
+		},
+		func(string, int, string) error {
+			t.Fatal("runClient should not be called")
+			return nil
+		},
+	)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if got := stderr.String(); !strings.Contains(got, "--basic-auth must be in 'user:pass' format") {
+		t.Fatalf("stderr = %q, want basic auth validation message", got)
+	}
+}
+
+func TestRunStreamerFlagAndClientError(t *testing.T) {
+	oldLogger := slog.Default()
+	oldRedact := redact.Enabled
+	t.Cleanup(func() {
+		slog.SetDefault(oldLogger)
+		redact.Enabled = oldRedact
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+
+	code := run(
+		[]string{"ratatosk", "-streamer"},
+		func(string) string { return "" },
+		&stdout,
+		&stderr,
+		func(string) error {
+			t.Fatal("updateCLI should not be called")
+			return nil
+		},
+		func(string, int, string) error { return errors.New("dial failed") },
+	)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if !redact.Enabled {
+		t.Fatal("redact.Enabled = false, want true")
+	}
 }
 
 func TestRunClientHappyPath(t *testing.T) {
