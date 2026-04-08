@@ -32,13 +32,10 @@ jobs:
           go-version: "1.26"
 
       - name: Build Dashboard
-        working-directory: cmd/server/dashboard
-        run: |
-          pnpm install --frozen-lockfile
-          pnpm run build
+        run: make build-dashboard
 
       - name: Run Tests
-        run: go test ./...
+        run: make test
 
       - name: Build Server (linux/amd64)
         env:

@@ -23,19 +23,13 @@ jobs:
           go-version: "1.26"
 
       - name: Check formatting
-        run: |
-          unformatted=$(gofmt -l .)
-          if [ -n "$unformatted" ]; then
-            echo "::error::Files not formatted with gofmt:"
-            echo "$unformatted"
-            exit 1
-          fi
+        run: make format-check
 
-      - name: Vet
-        run: go vet -tags dev ./...
+      - name: Lint
+        run: make lint
 
       - name: Test
-        run: go test -tags dev -race -coverprofile=coverage.out ./...
+        run: make coverage
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
@@ -46,9 +40,6 @@ jobs:
   dashboard:
     name: Dashboard
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: cmd/server/dashboard
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -64,16 +55,16 @@ jobs:
           package_json_file: cmd/server/dashboard/package.json
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile
+        run: cd cmd/server/dashboard && pnpm install --frozen-lockfile
 
       - name: Format check
-        run: pnpm run format:check
+        run: make dashboard-format-check
 
       - name: Lint
-        run: pnpm run lint
+        run: make dashboard-lint
 
       - name: Typecheck
-        run: pnpm run typecheck
+        run: make dashboard-typecheck
 
       - name: Build
-        run: pnpm run build
+        run: make build-dashboard
