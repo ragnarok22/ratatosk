@@ -10,7 +10,7 @@ import (
 	"ratatosk/internal/redact"
 )
 
-var fallbackPorts = []int{4040, 5050, 6060, 7070, 8080}
+var fallbackPorts = []int{4040, 5050, 6060, 7070, 8080, 0}
 
 // StartServer starts the inspector web UI on the first available port.
 // It returns the bound address (e.g. "127.0.0.1:4040") or an error if

@@ -80,11 +80,16 @@ func TestStartServerPortFallback(t *testing.T) {
 }
 
 func TestStartServerAllPortsBusy(t *testing.T) {
+	// Override fallbackPorts with fixed ports (no port 0) so we can
+	// occupy them all and verify the error path.
+	orig := fallbackPorts
+	fallbackPorts = []int{19100, 19101}
+	t.Cleanup(func() { fallbackPorts = orig })
+
 	var listeners []net.Listener
 	for _, port := range fallbackPorts {
 		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
 		if err != nil {
-			// Port already in use, we can't fully control the test.
 			for _, l := range listeners {
 				l.Close()
 			}
