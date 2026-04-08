@@ -57,7 +57,7 @@ jobs:
             fi
             echo "Building ${target} -> ${output}"
             CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
-              go build -ldflags="-s -w" -o "$output" ./cmd/cli
+              go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" -o "$output" ./cmd/cli
           done
 
       - name: Prepare Deploy Artifacts
@@ -140,25 +140,24 @@ jobs:
 
           cat > Formula/ratatosk.rb <<FORMULA
           class Ratatosk < Formula
-            desc "Self-hosted reverse proxy and tunneling tool"
+            desc "A self-hosted, open-source alternative to ngrok"
             homepage "https://github.com/${repo}"
             version "${version}"
             license "GPL-3.0-or-later"
 
             on_macos do
-              on_arm do
-                url "https://github.com/${repo}/releases/download/${tag}/ratatosk-cli-darwin-arm64"
+              if Hardware::CPU.arm?
+                url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-darwin-arm64"
                 sha256 "${{ steps.hashes.outputs.darwin_arm64 }}"
-              end
-              on_intel do
-                url "https://github.com/${repo}/releases/download/${tag}/ratatosk-cli-darwin-amd64"
+              elsif Hardware::CPU.intel?
+                url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-darwin-amd64"
                 sha256 "${{ steps.hashes.outputs.darwin_amd64 }}"
               end
             end
 
             on_linux do
-              on_intel do
-                url "https://github.com/${repo}/releases/download/${tag}/ratatosk-cli-linux-amd64"
+              if Hardware::CPU.intel?
+                url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-linux-amd64"
                 sha256 "${{ steps.hashes.outputs.linux_amd64 }}"
               end
             end
@@ -168,7 +167,7 @@ jobs:
             end
 
             test do
-              assert_match "ratatosk", shell_output("#{bin}/ratatosk --help")
+              system "#{bin}/ratatosk", "version"
             end
           end
           FORMULA
