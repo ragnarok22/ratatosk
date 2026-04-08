@@ -3,6 +3,7 @@ package updater
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,6 +20,16 @@ const repoName = "ratatosk"
 type githubRelease struct {
 	TagName string `json:"tag_name"`
 }
+
+var (
+	updaterFetchLatest  = fetchLatestVersion
+	updaterExecutable   = os.Executable
+	updaterEvalSymlinks = filepath.EvalSymlinks
+	updaterHTTPGet      = http.Get
+	updaterApplyUpdate  = func(r io.Reader) error {
+		return selfupdate.Apply(r, selfupdate.Options{})
+	}
+)
 
 // isHomebrewPath reports whether the given executable path belongs to a
 // Homebrew (or Linuxbrew) installation.
@@ -131,7 +142,7 @@ func UpdateCLI(currentVersion string) error {
 		return nil
 	}
 
-	latest, err := fetchLatestVersion(http.DefaultClient)
+	latest, err := updaterFetchLatest(http.DefaultClient)
 	if err != nil {
 		return err
 	}
@@ -146,11 +157,11 @@ func UpdateCLI(currentVersion string) error {
 	}
 
 	// An update is available — check installation method before proceeding.
-	execPath, err := os.Executable()
+	execPath, err := updaterExecutable()
 	if err != nil {
 		return fmt.Errorf("failed to determine executable path: %w", err)
 	}
-	resolved, err := filepath.EvalSymlinks(execPath)
+	resolved, err := updaterEvalSymlinks(execPath)
 	if err != nil {
 		return fmt.Errorf("failed to resolve executable path: %w", err)
 	}
@@ -163,7 +174,7 @@ func UpdateCLI(currentVersion string) error {
 	assetURL := buildAssetURL(latest)
 	fmt.Printf("Downloading %s ...\n", latest)
 
-	resp, err := http.Get(assetURL)
+	resp, err := updaterHTTPGet(assetURL)
 	if err != nil {
 		return fmt.Errorf("failed to download update: %w", err)
 	}
@@ -176,7 +187,7 @@ func UpdateCLI(currentVersion string) error {
 		return fmt.Errorf("failed to download update: HTTP %d", resp.StatusCode)
 	}
 
-	if err := selfupdate.Apply(resp.Body, selfupdate.Options{}); err != nil {
+	if err := updaterApplyUpdate(resp.Body); err != nil {
 		return fmt.Errorf("failed to apply update: %w", err)
 	}
 

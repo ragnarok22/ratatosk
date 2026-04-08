@@ -12,6 +12,11 @@ import (
 
 const udpSessionIdleTimeout = 60 * time.Second
 
+var (
+	udpReadFrame  = ReadFrame
+	udpWriteFrame = WriteFrame
+)
+
 type udpPeer struct {
 	stream   net.Conn
 	lastSeen time.Time
@@ -79,7 +84,7 @@ func ServeUDP(ctx context.Context, conn *net.UDPConn, session *yamux.Session) {
 		peer.lastSeen = time.Now()
 		mu.Unlock()
 
-		if err := WriteFrame(peer.stream, buf[:n]); err != nil {
+		if err := udpWriteFrame(peer.stream, buf[:n]); err != nil {
 			slog.Error("failed to write UDP frame to stream", "addr", addrKey, "error", err)
 			mu.Lock()
 			peer.stream.Close()
@@ -116,7 +121,7 @@ func udpStreamToConn(
 		default:
 		}
 
-		data, err := ReadFrame(stream)
+		data, err := udpReadFrame(stream)
 		if err != nil {
 			return
 		}
