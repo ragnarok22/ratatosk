@@ -116,6 +116,39 @@ func TestHasSubdomain(t *testing.T) {
 	}
 }
 
+func TestListTunnels(t *testing.T) {
+	r := NewRegistry()
+	_, sess1 := newTestSession(t)
+	_, sess2 := newTestSession(t)
+
+	r.Register("alpha", sess1)
+	r.Register("beta", sess2)
+
+	tunnels := r.ListTunnels()
+	if len(tunnels) != 2 {
+		t.Fatalf("expected 2 tunnels, got %d", len(tunnels))
+	}
+
+	names := map[string]bool{}
+	for _, ti := range tunnels {
+		names[ti.Subdomain] = true
+		if ti.ConnectedAt.IsZero() {
+			t.Fatalf("ConnectedAt is zero for %s", ti.Subdomain)
+		}
+	}
+	if !names["alpha"] || !names["beta"] {
+		t.Fatalf("missing expected subdomains: got %v", names)
+	}
+}
+
+func TestListTunnelsEmpty(t *testing.T) {
+	r := NewRegistry()
+	tunnels := r.ListTunnels()
+	if len(tunnels) != 0 {
+		t.Fatalf("expected 0 tunnels, got %d", len(tunnels))
+	}
+}
+
 func TestConcurrentAccess(t *testing.T) {
 	r := NewRegistry()
 

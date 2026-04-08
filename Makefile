@@ -1,7 +1,7 @@
-.PHONY: dev-server dev-cli dev-dashboard build clean format lint test test-race coverage
+.PHONY: dev-server dev-cli dev-dashboard build build-dashboard clean format lint test test-race coverage
 
 dev-server:
-	go run ./cmd/server
+	go run -tags dev ./cmd/server
 
 dev-cli:
 	go run ./cmd/cli
@@ -9,7 +9,10 @@ dev-cli:
 dev-dashboard:
 	cd cmd/server/dashboard && pnpm run dev
 
-build:
+build-dashboard:
+	cd cmd/server/dashboard && pnpm install && pnpm run build
+
+build: build-dashboard
 	go build -o bin/server ./cmd/server
 	go build -o bin/cli ./cmd/cli
 
@@ -17,17 +20,17 @@ format:
 	gofmt -w .
 
 lint:
-	go vet ./...
+	go vet -tags dev ./...
 
 test:
-	go test ./...
+	go test -tags dev ./...
 
 test-race:
-	go test -race ./...
+	go test -tags dev -race ./...
 
 coverage:
-	go test -coverprofile=coverage.out ./...
+	go test -tags dev -coverprofile=coverage.out ./...
 	go tool cover -func=coverage.out
 
 clean:
-	rm -rf bin/ coverage.out
+	rm -rf bin/ coverage.out cmd/server/dashboard/dist

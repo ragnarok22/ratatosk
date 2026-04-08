@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -93,5 +94,40 @@ func TestHandleHTTPTunnelNotFound(t *testing.T) {
 
 	if w.Code != http.StatusBadGateway {
 		t.Errorf("status = %d, want %d", w.Code, http.StatusBadGateway)
+	}
+}
+
+func TestAdminAPITunnels(t *testing.T) {
+	handler := newAdminHandler(registry)
+	req := httptest.NewRequest(http.MethodGet, "/api/tunnels", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	ct := w.Header().Get("Content-Type")
+	if ct != "application/json" {
+		t.Fatalf("content-type = %q, want application/json", ct)
+	}
+
+	var body struct {
+		Tunnels []tunnel.TunnelInfo `json:"tunnels"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+}
+
+func TestAdminDashboardFallback(t *testing.T) {
+	handler := newAdminHandler(registry)
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
 	}
 }

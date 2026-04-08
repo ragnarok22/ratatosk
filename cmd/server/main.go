@@ -37,12 +37,27 @@ func main() {
 		}
 	}()
 
-	// Start the public HTTP server on the main goroutine.
-	slog.Info("public HTTP server listening", "addr", ":8080")
-	if err := http.ListenAndServe(":8080", http.HandlerFunc(handleHTTP)); err != nil {
-		slog.Error("HTTP server failed", "error", err)
-		os.Exit(1)
-	}
+	// Start the admin dashboard server.
+	go func() {
+		adminHandler := newAdminHandler(registry)
+		slog.Info("admin dashboard listening", "addr", ":8081")
+		if err := http.ListenAndServe(":8081", adminHandler); err != nil {
+			slog.Error("admin server failed", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Start the public HTTP server.
+	go func() {
+		slog.Info("public HTTP server listening", "addr", ":8080")
+		if err := http.ListenAndServe(":8080", http.HandlerFunc(handleHTTP)); err != nil {
+			slog.Error("HTTP server failed", "error", err)
+			os.Exit(1)
+		}
+	}()
+
+	// Block forever.
+	select {}
 }
 
 func handleConnection(conn net.Conn) {
