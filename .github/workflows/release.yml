@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "22"
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+
+      - name: Build Dashboard
+        working-directory: cmd/server/dashboard
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm run build
+
+      - name: Run Tests
+        run: go test ./...
+
+      - name: Build Server (linux/amd64)
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: |
+          go build -ldflags="-s -w" -o dist/ratatosk-server-linux-amd64 ./cmd/server
+
+      - name: Build CLI Binaries
+        run: |
+          targets="linux/amd64 darwin/arm64 darwin/amd64 windows/amd64"
+          for target in $targets; do
+            os="${target%/*}"
+            arch="${target#*/}"
+            output="dist/ratatosk-cli-${os}-${arch}"
+            if [ "$os" = "windows" ]; then
+              output="${output}.exe"
+            fi
+            echo "Building ${target} -> ${output}"
+            CGO_ENABLED=0 GOOS="$os" GOARCH="$arch" \
+              go build -ldflags="-s -w" -o "$output" ./cmd/cli
+          done
+
+      - name: Prepare Deploy Artifacts
+        run: |
+          cp deploy/ratatosk.yaml.example dist/
+          cp deploy/ratatosk.service dist/
+          cp deploy/Dockerfile.server dist/
+
+      - name: Generate Changelog
+        id: changelog
+        run: |
+          # Find the previous tag to generate a changelog diff.
+          prev_tag=$(git tag --sort=-v:refname | head -2 | tail -1)
+          tag=${GITHUB_REF#refs/tags/}
+
+          {
+            echo "changelog<<CHANGELOG_EOF"
+            if [ "$prev_tag" != "$tag" ] && [ -n "$prev_tag" ]; then
+              echo "## What's Changed"
+              echo ""
+              git log --pretty=format:"- %s (%h)" "${prev_tag}..${tag}"
+              echo ""
+              echo ""
+              echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${prev_tag}...${tag}"
+            else
+              echo "## Initial Release"
+              echo ""
+              git log --pretty=format:"- %s (%h)" "${tag}"
+            fi
+            echo ""
+            echo "CHANGELOG_EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          body: ${{ steps.changelog.outputs.changelog }}
+          files: |
+            dist/ratatosk-server-linux-amd64
+            dist/ratatosk-cli-linux-amd64
+            dist/ratatosk-cli-darwin-arm64
+            dist/ratatosk-cli-darwin-amd64
+            dist/ratatosk-cli-windows-amd64.exe
+            dist/ratatosk.yaml.example
+            dist/ratatosk.service
+            dist/Dockerfile.server
