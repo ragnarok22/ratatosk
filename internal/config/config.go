@@ -10,6 +10,8 @@ import (
 	"github.com/spf13/viper"
 )
 
+var osUserHomeDir = os.UserHomeDir
+
 // ServerConfig holds all configuration for the relay server.
 type ServerConfig struct {
 	BaseDomain     string `mapstructure:"base_domain"`
@@ -53,9 +55,10 @@ func (c *ServerConfig) TunnelURL(subdomain string) string {
 }
 
 // LoadConfig reads configuration from file, environment variables, and defaults.
-// Search paths for ratatosk.yaml: /etc/ratatosk/, $HOME/.ratatosk/, and the
-// current working directory. Environment variables use the RATATOSK_ prefix
-// (e.g. RATATOSK_BASE_DOMAIN).
+// Search paths for ratatosk.yaml: /etc/ratatosk/, <resolved-home>/.ratatosk/,
+// and the current working directory. The home path is resolved via
+// os.UserHomeDir(); if it cannot be resolved, LoadConfig returns an error.
+// Environment variables use the RATATOSK_ prefix (e.g. RATATOSK_BASE_DOMAIN).
 func LoadConfig() (*ServerConfig, error) {
 	v := viper.New()
 
@@ -74,9 +77,11 @@ func LoadConfig() (*ServerConfig, error) {
 	v.SetConfigName("ratatosk")
 	v.SetConfigType("yaml")
 	v.AddConfigPath("/etc/ratatosk/")
-	if homeDir, err := os.UserHomeDir(); err == nil && homeDir != "" {
-		v.AddConfigPath(filepath.Join(homeDir, ".ratatosk"))
+	homeDir, err := osUserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolving home directory: %w", err)
 	}
+	v.AddConfigPath(filepath.Join(homeDir, ".ratatosk"))
 	v.AddConfigPath(".")
 
 	// Environment variables.
