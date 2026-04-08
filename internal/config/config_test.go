@@ -6,18 +6,25 @@ import (
 	"testing"
 )
 
-func TestLoadConfigDefaults(t *testing.T) {
-	// Ensure no config file or env vars interfere.
+func clearConfigEnv(t *testing.T) {
+	t.Helper()
+
 	for _, key := range []string{
 		"RATATOSK_BASE_DOMAIN",
 		"RATATOSK_PUBLIC_PORT",
 		"RATATOSK_ADMIN_PORT",
 		"RATATOSK_CONTROL_PORT",
 		"RATATOSK_TLS_ENABLED",
+		"RATATOSK_PORT_RANGE_START",
+		"RATATOSK_PORT_RANGE_END",
 	} {
 		t.Setenv(key, "")
-		os.Unsetenv(key)
 	}
+}
+
+func TestLoadConfigDefaults(t *testing.T) {
+	// Ensure no config file or env vars interfere.
+	clearConfigEnv(t)
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -182,10 +189,10 @@ tls_enabled: false
 		t.Run(tt.name, func(t *testing.T) {
 			homeDir := t.TempDir()
 			configDir := filepath.Join(homeDir, ".ratatosk")
-			if err := os.Mkdir(configDir, 0755); err != nil {
+			if err := os.MkdirAll(configDir, 0o755); err != nil {
 				t.Fatalf("Mkdir: %v", err)
 			}
-			if err := os.WriteFile(filepath.Join(configDir, "ratatosk.yaml"), []byte(tt.fileContent), 0644); err != nil {
+			if err := os.WriteFile(filepath.Join(configDir, "ratatosk.yaml"), []byte(tt.fileContent), 0o644); err != nil {
 				t.Fatalf("WriteFile: %v", err)
 			}
 
@@ -198,19 +205,9 @@ tls_enabled: false
 			t.Cleanup(func() { _ = os.Chdir(orig) })
 
 			t.Setenv("HOME", homeDir)
-			for _, key := range []string{
-				"RATATOSK_BASE_DOMAIN",
-				"RATATOSK_PUBLIC_PORT",
-				"RATATOSK_ADMIN_PORT",
-				"RATATOSK_CONTROL_PORT",
-				"RATATOSK_TLS_ENABLED",
-				"RATATOSK_PORT_RANGE_START",
-				"RATATOSK_PORT_RANGE_END",
-			} {
-				t.Setenv(key, "")
-				if value, ok := tt.env[key]; ok {
-					t.Setenv(key, value)
-				}
+			clearConfigEnv(t)
+			for key, value := range tt.env {
+				t.Setenv(key, value)
 			}
 
 			cfg, err := LoadConfig()
