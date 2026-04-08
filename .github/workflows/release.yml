@@ -104,3 +104,77 @@ jobs:
             dist/ratatosk.yaml.example
             dist/ratatosk.service
             dist/Dockerfile.server
+
+  update-homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download release binaries
+        run: |
+          tag=${GITHUB_REF#refs/tags/}
+          base_url="https://github.com/${{ github.repository }}/releases/download/${tag}"
+          mkdir -p binaries
+          for bin in ratatosk-cli-darwin-arm64 ratatosk-cli-darwin-amd64 ratatosk-cli-linux-amd64; do
+            curl -fsSL "${base_url}/${bin}" -o "binaries/${bin}"
+          done
+
+      - name: Calculate SHA256 hashes
+        id: hashes
+        run: |
+          echo "darwin_arm64=$(sha256sum binaries/ratatosk-cli-darwin-arm64 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "darwin_amd64=$(sha256sum binaries/ratatosk-cli-darwin-amd64 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "linux_amd64=$(sha256sum binaries/ratatosk-cli-linux-amd64 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+
+      - name: Update Homebrew formula
+        env:
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+        run: |
+          tag=${GITHUB_REF#refs/tags/}
+          version="${tag#v}"
+          repo="${{ github.repository }}"
+          owner="${{ github.repository_owner }}"
+
+          git clone "https://x-access-token:${TAP_GITHUB_TOKEN}@github.com/${owner}/homebrew-tap.git"
+          cd homebrew-tap
+          mkdir -p Formula
+
+          cat > Formula/ratatosk.rb <<FORMULA
+          class Ratatosk < Formula
+            desc "Self-hosted reverse proxy and tunneling tool"
+            homepage "https://github.com/${repo}"
+            version "${version}"
+            license "GPL-3.0-or-later"
+
+            on_macos do
+              on_arm do
+                url "https://github.com/${repo}/releases/download/${tag}/ratatosk-cli-darwin-arm64"
+                sha256 "${{ steps.hashes.outputs.darwin_arm64 }}"
+              end
+              on_intel do
+                url "https://github.com/${repo}/releases/download/${tag}/ratatosk-cli-darwin-amd64"
+                sha256 "${{ steps.hashes.outputs.darwin_amd64 }}"
+              end
+            end
+
+            on_linux do
+              on_intel do
+                url "https://github.com/${repo}/releases/download/${tag}/ratatosk-cli-linux-amd64"
+                sha256 "${{ steps.hashes.outputs.linux_amd64 }}"
+              end
+            end
+
+            def install
+              bin.install Dir["ratatosk-cli-*"].first => "ratatosk"
+            end
+
+            test do
+              assert_match "ratatosk", shell_output("#{bin}/ratatosk --help")
+            end
+          end
+          FORMULA
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/ratatosk.rb
+          git commit -m "Update Ratatosk to ${tag}"
+          git push origin main
