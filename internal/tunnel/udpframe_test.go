@@ -120,3 +120,13 @@ func TestWriteFrameHeaderWriteError(t *testing.T) {
 		t.Fatal("expected write error")
 	}
 }
+
+func TestWriteFrameRejectsOversizedPayload(t *testing.T) {
+	var buf bytes.Buffer
+	payload := make([]byte, MaxUDPFrameSize+1)
+
+	err := WriteFrame(&buf, payload)
+	if err == nil {
+		t.Fatal("expected oversized payload error")
+	}
+}
