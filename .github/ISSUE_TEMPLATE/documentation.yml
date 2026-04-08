@@ -1,0 +1,39 @@
+name: Documentation issue
+description: Report missing, unclear, or incorrect documentation
+title: "[Docs]: "
+body:
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for the same documentation problem.
+          required: true
+  - type: textarea
+    id: issue
+    attributes:
+      label: What is wrong or missing?
+      description: Describe the documentation problem clearly.
+      placeholder: The README explains how to start the server and CLI, but does not say how public traffic is expected to reach the relay server.
+    validations:
+      required: true
+  - type: textarea
+    id: location
+    attributes:
+      label: Where is the problem?
+      description: Link the page, file, or section if you know it.
+      placeholder: README.md, Quick Start section
+  - type: textarea
+    id: suggestion
+    attributes:
+      label: Suggested improvement
+      description: Describe the correction or missing content.
+      placeholder: Add a short section describing DNS, TLS termination, and reverse proxy expectations for public deployments.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add screenshots or extra detail if useful.
+

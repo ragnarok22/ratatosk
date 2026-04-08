@@ -1,0 +1,39 @@
+name: Feature request
+description: Suggest an improvement or new capability
+title: "[Feature]: "
+body:
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Before submitting
+      options:
+        - label: I searched existing issues for similar requests.
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem are you trying to solve?
+      description: Explain the current limitation or pain point.
+      placeholder: It is difficult to understand which tunnels are consuming the most bandwidth over time.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the change you want to see.
+      placeholder: Add per-tunnel bandwidth charts in the dashboard with a short retention window.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Describe any workarounds or other approaches you considered.
+      placeholder: Exporting logs and graphing them externally works, but it is cumbersome for quick inspection.
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Include screenshots, examples, related issues, or implementation notes if helpful.
+
