@@ -128,7 +128,7 @@ Example output with streamer mode enabled:
 ```
 Ratatosk                        (Ctrl+C to quit)
 
-Forwarding      http://quick-fox-1234.tunnel.example.com -> http://localhost:[REDACTED]
+Forwarding      http://golden-bifrost-004721.tunnel.example.com -> http://localhost:[REDACTED]
 Web Interface   http://[REDACTED]
 ```
 

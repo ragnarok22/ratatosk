@@ -65,7 +65,7 @@ ratatosk --port 3000
 ```
 Ratatosk                        (Ctrl+C to quit)
 
-Forwarding      http://quick-fox-1234.tunnel.example.com -> http://localhost:3000
+Forwarding      http://golden-bifrost-004721.tunnel.example.com -> http://localhost:3000
 Web Interface   http://127.0.0.1:4300
 ```
 

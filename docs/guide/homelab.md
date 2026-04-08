@@ -77,7 +77,7 @@ To expose your Home Assistant dashboard:
 3. Optionally set `basic_auth` to protect the tunnel (e.g., `admin:secret`)
 4. Start the add-on
 
-Your Home Assistant instance will be available at the generated tunnel URL (e.g., `https://quick-fox-001234.tunnel.example.com`).
+Your Home Assistant instance will be available at the generated tunnel URL (e.g., `https://golden-bifrost-004721.tunnel.example.com`).
 
 ## CLI Client with Environment Variables
 

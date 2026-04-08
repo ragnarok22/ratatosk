@@ -59,17 +59,17 @@ func WriteResponse(w io.Writer, resp *TunnelResponse) error {
 }
 
 var adjectives = []string{
-	"quick", "brave", "calm", "eager", "happy",
-	"kind", "lively", "proud", "sharp", "warm",
-	"bold", "cool", "deep", "fair", "grand",
-	"neat", "rare", "safe", "swift", "wise",
+	"mighty", "silent", "golden", "ancient", "frozen",
+	"hidden", "iron", "runic", "fated", "stormy",
+	"fierce", "hollow", "vast", "ashen", "starlit",
+	"bright", "shadow", "sworn", "bitter", "winged",
 }
 
 var nouns = []string{
-	"fox", "bear", "hawk", "wolf", "deer",
-	"hare", "lynx", "seal", "wren", "dove",
-	"otter", "raven", "tiger", "panda", "eagle",
-	"crane", "bison", "coral", "cedar", "maple",
+	"odin", "thor", "freya", "loki", "fenrir",
+	"ymir", "sigyn", "bragi", "baldr", "tyr",
+	"mjolnir", "asgard", "bifrost", "niflheim", "muspel",
+	"valkyrie", "jotunn", "hugin", "munin", "sleipnir",
 }
 
 // GenerateSubdomain returns a human-readable subdomain in adjective-noun-NNNN format.

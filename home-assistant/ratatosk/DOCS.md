@@ -22,7 +22,7 @@ To expose your Home Assistant dashboard running on port 8123:
 1. Install the add-on
 2. Set `server` to your relay server address (e.g., `tunnel.example.com:7000`)
 3. Start the add-on
-4. Your HA instance will be available at the generated subdomain URL (e.g., `https://quick-fox-001234.tunnel.example.com`)
+4. Your HA instance will be available at the generated subdomain URL (e.g., `https://golden-bifrost-004721.tunnel.example.com`)
 
 ## Support
 

@@ -166,7 +166,7 @@ With the server running on your VPS, connect from your local machine:
 ratatosk --port 3000
 ```
 
-You should get a tunnel URL like `https://quick-fox-1234.tunnel.yourdomain.com` pointing to your `localhost:3000`.
+You should get a tunnel URL like `https://golden-bifrost-004721.tunnel.yourdomain.com` pointing to your `localhost:3000`.
 
 ## Deploying with Docker (Alternative)
 
