@@ -2,16 +2,20 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
 	"ratatosk/internal/inspector"
 	"ratatosk/internal/protocol"
+	"ratatosk/internal/redact"
 	"ratatosk/internal/tunnel"
 )
 
@@ -229,5 +233,55 @@ func TestHandleStream(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
+	}
+}
+
+func TestRunClientStreamerBanner(t *testing.T) {
+	redact.Enabled = true
+	t.Cleanup(func() { redact.Enabled = false })
+
+	// Capture stdout to verify the banner is redacted.
+	old := os.Stdout
+	r, w, _ := os.Pipe()
+	os.Stdout = w
+
+	addr := startMockRelay(t, func(conn net.Conn) {
+		defer conn.Close()
+		session, err := tunnel.NewServerSession(conn)
+		if err != nil {
+			return
+		}
+		defer session.Close()
+
+		cs, err := session.Accept()
+		if err != nil {
+			return
+		}
+		protocol.ReadRequest(cs)
+		protocol.WriteResponse(cs, &protocol.TunnelResponse{
+			Success:   true,
+			Subdomain: "test-streamer",
+		})
+		cs.Close()
+	})
+
+	runClient(addr, 9999)
+
+	w.Close()
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	os.Stdout = old
+
+	output := buf.String()
+
+	// The local port should be redacted in the banner.
+	if strings.Contains(output, "9999") {
+		t.Errorf("local port leaked in streamer mode: %s", output)
+	}
+	if !strings.Contains(output, "http://test-streamer.localhost:8080") {
+		t.Errorf("subdomain URL missing from banner: %s", output)
+	}
+	if !strings.Contains(output, "[REDACTED]") {
+		t.Errorf("expected [REDACTED] in banner: %s", output)
 	}
 }

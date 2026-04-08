@@ -6,6 +6,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+
+	"ratatosk/internal/redact"
 )
 
 var fallbackPorts = []int{4040, 5050, 6060, 7070, 8080}
@@ -31,7 +33,16 @@ func StartServer(logger *Logger) (string, error) {
 
 	mux.HandleFunc("GET /api/logs", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(logger.Entries())
+		entries := logger.Entries()
+		if redact.Enabled {
+			for i := range entries {
+				entries[i].ReqHeaders = redact.Headers(entries[i].ReqHeaders)
+				entries[i].RespHeaders = redact.Headers(entries[i].RespHeaders)
+				entries[i].ReqBody = redact.String(entries[i].ReqBody)
+				entries[i].RespBody = redact.String(entries[i].RespBody)
+			}
+		}
+		json.NewEncoder(w).Encode(entries)
 	})
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {

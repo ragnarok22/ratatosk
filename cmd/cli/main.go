@@ -10,6 +10,7 @@ import (
 
 	"ratatosk/internal/inspector"
 	"ratatosk/internal/protocol"
+	"ratatosk/internal/redact"
 	"ratatosk/internal/tunnel"
 	"ratatosk/internal/updater"
 )
@@ -32,9 +33,11 @@ func main() {
 	}
 
 	port := flag.Int("port", 3000, "local port to expose")
+	streamer := flag.Bool("streamer", false, "redact sensitive data from output for streaming")
 	flag.Parse()
 
-	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, nil)))
+	redact.Enabled = *streamer
+	slog.SetDefault(slog.New(redact.NewHandler(slog.NewTextHandler(os.Stdout, nil))))
 
 	if err := runClient("localhost:7000", *port); err != nil {
 		slog.Error("client error", "error", err)
@@ -85,9 +88,15 @@ func runClient(serverAddr string, localPort int) error {
 	fmt.Println()
 	fmt.Println("Ratatosk                        (Ctrl+C to quit)")
 	fmt.Println()
-	fmt.Printf("Forwarding      http://%s.localhost:8080 -> http://localhost:%d\n", resp.Subdomain, localPort)
+	if redact.Enabled {
+		fmt.Printf("Forwarding      http://%s.localhost:8080 -> http://localhost:[REDACTED]\n", resp.Subdomain)
+	} else {
+		fmt.Printf("Forwarding      http://%s.localhost:8080 -> http://localhost:%d\n", resp.Subdomain, localPort)
+	}
 	if inspectorErr != nil {
 		slog.Warn("failed to start inspector", "error", inspectorErr)
+	} else if redact.Enabled {
+		fmt.Printf("Web Interface   http://[REDACTED]\n")
 	} else {
 		fmt.Printf("Web Interface   http://%s\n", inspectorAddr)
 	}

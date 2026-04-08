@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"ratatosk/internal/redact"
 )
 
 // HandleStream intercepts HTTP traffic on a yamux stream, logs it, and
@@ -49,7 +51,7 @@ func HandleStream(stream net.Conn, localAddr string, logger *Logger) {
 	resp, err := http.DefaultTransport.RoundTrip(req)
 	if err != nil {
 		slog.Error("failed to reach local server", "addr", localAddr, "error", err)
-		write502(stream, "failed to connect to local server: "+err.Error())
+		write502(stream, redact.String("failed to connect to local server: "+err.Error()))
 		return
 	}
 

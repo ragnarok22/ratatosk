@@ -8,6 +8,8 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+
+	"ratatosk/internal/redact"
 )
 
 func TestStartServer(t *testing.T) {
@@ -128,5 +130,71 @@ func TestAPILogsAfterTraffic(t *testing.T) {
 	}
 	if logs[0].Method != "POST" || logs[1].Method != "GET" {
 		t.Fatalf("unexpected log entries: %+v", logs)
+	}
+}
+
+func TestAPILogsRedacted(t *testing.T) {
+	redact.Enabled = true
+	t.Cleanup(func() { redact.Enabled = false })
+
+	logger := NewLogger()
+	logger.Add(TrafficLog{
+		Method: "GET",
+		Path:   "/api/data",
+		ReqHeaders: map[string]string{
+			"Authorization": "Bearer super-secret-token",
+			"Content-Type":  "application/json",
+		},
+		RespHeaders: map[string]string{
+			"Set-Cookie":   "session=abc123",
+			"X-Request-Id": "req-456",
+		},
+		ReqBody:    `{"ip": "192.168.1.100"}`,
+		RespBody:   `{"path": "/home/user/data"}`,
+		RespStatus: 200,
+	})
+
+	addr, err := StartServer(logger)
+	if err != nil {
+		t.Fatalf("StartServer failed: %v", err)
+	}
+
+	resp, err := http.Get("http://" + addr + "/api/logs")
+	if err != nil {
+		t.Fatalf("GET /api/logs failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	var logs []TrafficLog
+	json.NewDecoder(resp.Body).Decode(&logs)
+
+	if len(logs) != 1 {
+		t.Fatalf("expected 1 log, got %d", len(logs))
+	}
+
+	log := logs[0]
+
+	// Sensitive headers should be redacted.
+	if log.ReqHeaders["Authorization"] != "[REDACTED]" {
+		t.Errorf("Authorization not redacted: %q", log.ReqHeaders["Authorization"])
+	}
+	if log.RespHeaders["Set-Cookie"] != "[REDACTED]" {
+		t.Errorf("Set-Cookie not redacted: %q", log.RespHeaders["Set-Cookie"])
+	}
+
+	// Non-sensitive headers should be preserved.
+	if log.ReqHeaders["Content-Type"] != "application/json" {
+		t.Errorf("Content-Type modified: %q", log.ReqHeaders["Content-Type"])
+	}
+	if log.RespHeaders["X-Request-Id"] != "req-456" {
+		t.Errorf("X-Request-Id modified: %q", log.RespHeaders["X-Request-Id"])
+	}
+
+	// Bodies with sensitive patterns should be redacted.
+	if strings.Contains(log.ReqBody, "192.168.1.100") {
+		t.Errorf("IP in request body not redacted: %q", log.ReqBody)
+	}
+	if strings.Contains(log.RespBody, "/home/user") {
+		t.Errorf("file path in response body not redacted: %q", log.RespBody)
 	}
 }
