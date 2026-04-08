@@ -100,6 +100,17 @@ Every option can be set via environment variables with the `RATATOSK_` prefix. E
 
 The CLI client runs on your local machine. It opens a persistent, multiplexed connection to the relay server and forwards tunneled requests to a local port.
 
+### Homebrew (macOS / Linux)
+
+```sh
+brew tap ragnarok22/tap
+brew install ratatosk
+```
+
+### Download a Binary
+
+Grab the latest release for your platform from the [Releases](https://github.com/reinier-hernandez/ratatosk/releases) page.
+
 ### Build from Source
 
 ```sh
