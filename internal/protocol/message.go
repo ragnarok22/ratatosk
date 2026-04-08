@@ -63,6 +63,10 @@ var adjectives = []string{
 	"hidden", "iron", "runic", "fated", "stormy",
 	"fierce", "hollow", "vast", "ashen", "starlit",
 	"bright", "shadow", "sworn", "bitter", "winged",
+	"eternal", "sunken", "woven", "fearless", "shining",
+	"restless", "primal", "veiled", "wyrd", "sacred",
+	"blazing", "grim", "steadfast", "lone", "twilight",
+	"undying", "northern", "cursed", "elder", "wild",
 }
 
 var nouns = []string{
@@ -70,6 +74,10 @@ var nouns = []string{
 	"ymir", "sigyn", "bragi", "baldr", "tyr",
 	"mjolnir", "asgard", "bifrost", "niflheim", "muspel",
 	"valkyrie", "jotunn", "hugin", "munin", "sleipnir",
+	"heimdall", "frigg", "skadi", "njord", "vidar",
+	"hel", "surtr", "idun", "ull", "forseti",
+	"gungnir", "draupnir", "midgard", "valhalla", "ragnarok",
+	"norn", "rune", "einherjar", "gjallar", "yggdrasil",
 }
 
 // GenerateSubdomain returns a human-readable subdomain in adjective-noun-NNNN format.
