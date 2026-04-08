@@ -3,6 +3,7 @@ package main
 import (
 	"bufio"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -13,10 +14,260 @@ import (
 	"testing/fstest"
 	"time"
 
+	"ratatosk/internal/config"
 	"ratatosk/internal/inspector"
 	"ratatosk/internal/protocol"
 	"ratatosk/internal/tunnel"
 )
+
+func TestLoadServerConfig(t *testing.T) {
+	oldCfg := cfg
+	t.Cleanup(func() { cfg = oldCfg })
+
+	want := &config.ServerConfig{
+		BaseDomain:  "example.test",
+		PublicPort:  8443,
+		AdminPort:   9001,
+		ControlPort: 7001,
+		TLSEnabled:  true,
+	}
+
+	if err := loadServerConfig(func() (*config.ServerConfig, error) {
+		return want, nil
+	}); err != nil {
+		t.Fatalf("loadServerConfig: %v", err)
+	}
+
+	if cfg != want {
+		t.Fatalf("cfg = %#v, want %#v", cfg, want)
+	}
+}
+
+func TestLoadServerConfigError(t *testing.T) {
+	oldCfg := cfg
+	t.Cleanup(func() { cfg = oldCfg })
+
+	wantErr := errors.New("bad config")
+	err := loadServerConfig(func() (*config.ServerConfig, error) {
+		return nil, wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+}
+
+func TestStartControlPlaneListenError(t *testing.T) {
+	oldCfg := cfg
+	cfg = &config.ServerConfig{ControlPort: 7000}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	stop := make(chan struct{})
+	wantErr := errors.New("listen failed")
+
+	err := startControlPlane(stop, func(network, address string) (net.Listener, error) {
+		if network != "tcp" {
+			t.Fatalf("network = %q, want tcp", network)
+		}
+		if address != cfg.ControlAddr() {
+			t.Fatalf("address = %q, want %q", address, cfg.ControlAddr())
+		}
+		return nil, wantErr
+	})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+}
+
+func TestStartControlPlane(t *testing.T) {
+	oldCfg := cfg
+	cfg = &config.ServerConfig{ControlPort: 0}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	stop := make(chan struct{})
+	listenCalled := make(chan struct{})
+
+	err := startControlPlane(stop, func(network, address string) (net.Listener, error) {
+		ln, err := net.Listen(network, address)
+		if err != nil {
+			return nil, err
+		}
+		close(listenCalled)
+		return ln, nil
+	})
+	if err != nil {
+		t.Fatalf("startControlPlane: %v", err)
+	}
+
+	select {
+	case <-listenCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("listen function was not called")
+	}
+
+	close(stop)
+}
+
+func TestStartAdminServer(t *testing.T) {
+	oldCfg := cfg
+	cfg = &config.ServerConfig{AdminPort: 8081}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	stop := make(chan struct{})
+	called := make(chan struct{})
+
+	errs := startAdminServer(stop, func(addr string, handler http.Handler) error {
+		if addr != cfg.AdminAddr() {
+			t.Fatalf("addr = %q, want %q", addr, cfg.AdminAddr())
+		}
+
+		req := httptest.NewRequest(http.MethodGet, "/api/tunnels", nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", w.Code)
+		}
+
+		close(called)
+		<-stop
+		return nil
+	})
+
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("admin server was not started")
+	}
+
+	close(stop)
+	if err := <-errs; err != nil {
+		t.Fatalf("admin error = %v, want nil", err)
+	}
+}
+
+func TestStartPublicServerHTTP(t *testing.T) {
+	oldCfg := cfg
+	cfg = &config.ServerConfig{BaseDomain: "localhost", PublicPort: 8080}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	stop := make(chan struct{})
+	called := make(chan struct{})
+
+	errs := startPublicServer(
+		stop,
+		func(addr string, handler http.Handler) error {
+			if addr != cfg.PublicAddr() {
+				t.Fatalf("addr = %q, want %q", addr, cfg.PublicAddr())
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Host = "localhost:8080"
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+			}
+
+			close(called)
+			<-stop
+			return nil
+		},
+		func(string, string, string, http.Handler) error {
+			t.Fatal("serveTLS should not be called")
+			return nil
+		},
+	)
+
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("public HTTP server was not started")
+	}
+
+	close(stop)
+	if err := <-errs; err != nil {
+		t.Fatalf("public HTTP error = %v, want nil", err)
+	}
+}
+
+func TestStartPublicServerHTTPS(t *testing.T) {
+	oldCfg := cfg
+	cfg = &config.ServerConfig{
+		BaseDomain:  "localhost",
+		PublicPort:  443,
+		TLSEnabled:  true,
+		TLSCertFile: "cert.pem",
+		TLSKeyFile:  "key.pem",
+	}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	stop := make(chan struct{})
+	redirectCalled := make(chan struct{})
+	httpsCalled := make(chan struct{})
+
+	errs := startPublicServer(
+		stop,
+		func(addr string, handler http.Handler) error {
+			if addr != ":80" {
+				t.Fatalf("redirect addr = %q, want %q", addr, ":80")
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "http://ratatosk.localhost/docs?a=1", nil)
+			req.Host = "ratatosk.localhost"
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != http.StatusMovedPermanently {
+				t.Fatalf("redirect status = %d, want %d", w.Code, http.StatusMovedPermanently)
+			}
+			if location := w.Header().Get("Location"); location != "https://ratatosk.localhost/docs?a=1" {
+				t.Fatalf("Location = %q, want %q", location, "https://ratatosk.localhost/docs?a=1")
+			}
+
+			close(redirectCalled)
+			<-stop
+			return nil
+		},
+		func(addr, certFile, keyFile string, handler http.Handler) error {
+			if addr != cfg.PublicAddr() {
+				t.Fatalf("addr = %q, want %q", addr, cfg.PublicAddr())
+			}
+			if certFile != "cert.pem" {
+				t.Fatalf("certFile = %q, want %q", certFile, "cert.pem")
+			}
+			if keyFile != "key.pem" {
+				t.Fatalf("keyFile = %q, want %q", keyFile, "key.pem")
+			}
+
+			req := httptest.NewRequest(http.MethodGet, "/", nil)
+			req.Host = "localhost:443"
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if w.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+			}
+
+			close(httpsCalled)
+			<-stop
+			return nil
+		},
+	)
+
+	select {
+	case <-redirectCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("redirect server was not started")
+	}
+
+	select {
+	case <-httpsCalled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("public HTTPS server was not started")
+	}
+
+	close(stop)
+	if err := <-errs; err != nil {
+		t.Fatalf("public HTTPS error = %v, want nil", err)
+	}
+}
 
 func TestHandleConnectionHandshake(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
@@ -381,6 +632,59 @@ func TestAdminDashboardFallback(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestAdminDashboardEmbeddedFS(t *testing.T) {
+	handler := newAdminHandlerFS(registry, fstest.MapFS{
+		"dashboard/dist/index.html":     {Data: []byte("<html>dashboard</html>")},
+		"dashboard/dist/assets/app.js":  {Data: []byte("console.log('ok')")},
+		"dashboard/dist/assets/app.css": {Data: []byte("body { color: red; }")},
+		"dashboard/dist/favicon.svg":    {Data: []byte("<svg></svg>")},
+		"dashboard/dist/icons.svg":      {Data: []byte("<svg></svg>")},
+	})
+
+	t.Run("root", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "dashboard") {
+			t.Fatalf("body = %q, want embedded dashboard", w.Body.String())
+		}
+	})
+
+	t.Run("spa route", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/settings/profile", nil)
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "dashboard") {
+			t.Fatalf("body = %q, want SPA fallback", w.Body.String())
+		}
+	})
+}
+
+func TestAdminDashboardMissingIndexFallback(t *testing.T) {
+	handler := newAdminHandlerFS(registry, fstest.MapFS{
+		"dashboard/dist/assets/app.js": {Data: []byte("console.log('ok')")},
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "Dashboard not built. Run: make build") {
+		t.Fatalf("body = %q, want dashboard placeholder", w.Body.String())
 	}
 }
 
@@ -797,6 +1101,42 @@ func TestCheckBasicAuthMissing(t *testing.T) {
 	if w.Code != http.StatusUnauthorized {
 		t.Errorf("status = %d, want 401", w.Code)
 	}
+}
+
+func TestWriteRaw401(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		clientConn.Close()
+		serverConn.Close()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		writeRaw401(serverConn)
+	}()
+
+	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+	if got := resp.Header.Get("WWW-Authenticate"); got != `Basic realm="Ratatosk Tunnel"` {
+		t.Fatalf("WWW-Authenticate = %q, want %q", got, `Basic realm="Ratatosk Tunnel"`)
+	}
+	if string(body) != "Unauthorized" {
+		t.Fatalf("body = %q, want %q", body, "Unauthorized")
+	}
+
+	<-done
 }
 
 func TestHTTPProxyBasicAuthRejected(t *testing.T) {
