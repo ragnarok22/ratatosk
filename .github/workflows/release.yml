@@ -22,6 +22,8 @@ jobs:
 
       - name: Setup pnpm
         uses: pnpm/action-setup@v5
+        with:
+          package_json_file: cmd/server/dashboard/package.json
 
       - name: Setup Go
         uses: actions/setup-go@v6
