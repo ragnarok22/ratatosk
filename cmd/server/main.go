@@ -295,9 +295,7 @@ func handleHTTPTunnel(session *yamux.Session, controlStream net.Conn, req *proto
 		}
 	}
 	if subdomain == "" {
-		resp := &protocol.TunnelResponse{Success: false, Error: "failed to generate unique subdomain"}
-		protocol.WriteResponse(controlStream, resp)
-		controlStream.Close()
+		sendErrorAndClose(controlStream, "failed to generate unique subdomain")
 		return
 	}
 
@@ -318,20 +316,7 @@ func handleHTTPTunnel(session *yamux.Session, controlStream net.Conn, req *proto
 		"remote", remote,
 	)
 
-	// Block until the client disconnects. The server opens streams to the
-	// client (in handleHTTP), so Accept here only serves as a sentinel.
-	for {
-		stream, err := session.Accept()
-		if err != nil {
-			if err == io.EOF {
-				slog.Info("client disconnected", "subdomain", subdomain, "remote", remote)
-			} else {
-				slog.Warn("session error", "subdomain", subdomain, "remote", remote, "error", err)
-			}
-			break
-		}
-		stream.Close()
-	}
+	awaitSessionEnd(session, "subdomain", subdomain)
 
 	registry.Unregister(subdomain)
 	slog.Info("tunnel unregistered", "subdomain", subdomain, "remote", remote)
@@ -340,18 +325,14 @@ func handleHTTPTunnel(session *yamux.Session, controlStream net.Conn, req *proto
 func handleTCPTunnel(session *yamux.Session, controlStream net.Conn, req *protocol.TunnelRequest, remote string) {
 	port, err := portAlloc.Allocate()
 	if err != nil {
-		resp := &protocol.TunnelResponse{Success: false, Error: fmt.Sprintf("port allocation failed: %v", err)}
-		protocol.WriteResponse(controlStream, resp)
-		controlStream.Close()
+		sendErrorAndClose(controlStream, fmt.Sprintf("port allocation failed: %v", err))
 		return
 	}
 
 	ln, err := serverListenTCP("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		portAlloc.Release(port)
-		resp := &protocol.TunnelResponse{Success: false, Error: fmt.Sprintf("failed to listen on port %d: %v", port, err)}
-		protocol.WriteResponse(controlStream, resp)
-		controlStream.Close()
+		sendErrorAndClose(controlStream, fmt.Sprintf("failed to listen on port %d: %v", port, err))
 		return
 	}
 
@@ -383,51 +364,31 @@ func handleTCPTunnel(session *yamux.Session, controlStream net.Conn, req *protoc
 
 	go tunnel.ServeTCP(ctx, ln, session)
 
-	// Block until the client disconnects.
-	for {
-		stream, err := session.Accept()
-		if err != nil {
-			if err == io.EOF {
-				slog.Info("client disconnected", "port", port, "remote", remote)
-			} else {
-				slog.Warn("session error", "port", port, "remote", remote, "error", err)
-			}
-			break
-		}
-		stream.Close()
-	}
+	awaitSessionEnd(session, "port", fmt.Sprintf("%d", port))
 
 	cancel()
 	ln.Close()
-	registry.UnregisterPort(port)
-	portAlloc.Release(port)
-	slog.Info("TCP tunnel unregistered", "port", port, "remote", remote)
+	cleanupPort(port, "TCP")
 }
 
 func handleUDPTunnel(session *yamux.Session, controlStream net.Conn, req *protocol.TunnelRequest, remote string) {
 	port, err := portAlloc.Allocate()
 	if err != nil {
-		resp := &protocol.TunnelResponse{Success: false, Error: fmt.Sprintf("port allocation failed: %v", err)}
-		protocol.WriteResponse(controlStream, resp)
-		controlStream.Close()
+		sendErrorAndClose(controlStream, fmt.Sprintf("port allocation failed: %v", err))
 		return
 	}
 
 	udpAddr, err := serverResolveUDPAddr("udp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		portAlloc.Release(port)
-		resp := &protocol.TunnelResponse{Success: false, Error: fmt.Sprintf("failed to resolve UDP address: %v", err)}
-		protocol.WriteResponse(controlStream, resp)
-		controlStream.Close()
+		sendErrorAndClose(controlStream, fmt.Sprintf("failed to resolve UDP address: %v", err))
 		return
 	}
 
 	udpConn, err := serverListenUDP("udp", udpAddr)
 	if err != nil {
 		portAlloc.Release(port)
-		resp := &protocol.TunnelResponse{Success: false, Error: fmt.Sprintf("failed to listen on UDP port %d: %v", port, err)}
-		protocol.WriteResponse(controlStream, resp)
-		controlStream.Close()
+		sendErrorAndClose(controlStream, fmt.Sprintf("failed to listen on UDP port %d: %v", port, err))
 		return
 	}
 
@@ -459,25 +420,11 @@ func handleUDPTunnel(session *yamux.Session, controlStream net.Conn, req *protoc
 
 	go tunnel.ServeUDP(ctx, udpConn, session)
 
-	// Block until the client disconnects.
-	for {
-		stream, err := session.Accept()
-		if err != nil {
-			if err == io.EOF {
-				slog.Info("client disconnected", "port", port, "remote", remote)
-			} else {
-				slog.Warn("session error", "port", port, "remote", remote, "error", err)
-			}
-			break
-		}
-		stream.Close()
-	}
+	awaitSessionEnd(session, "port", fmt.Sprintf("%d", port))
 
 	cancel()
 	udpConn.Close()
-	registry.UnregisterPort(port)
-	portAlloc.Release(port)
-	slog.Info("UDP tunnel unregistered", "port", port, "remote", remote)
+	cleanupPort(port, "UDP")
 }
 
 func handleHTTP(w http.ResponseWriter, r *http.Request) {

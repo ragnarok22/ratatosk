@@ -15,6 +15,8 @@ import (
 	"ratatosk/internal/redact"
 	"ratatosk/internal/tunnel"
 	"ratatosk/internal/updater"
+
+	"github.com/hashicorp/yamux"
 )
 
 var Version = "dev"
@@ -185,51 +187,56 @@ func reorderProtoArgs(args []string) []string {
 	return append(flagArgs, positional...)
 }
 
-func runClient(serverAddr string, localPort int, basicAuth string) error {
-	localAddr := fmt.Sprintf("localhost:%d", localPort)
-
+// connectAndHandshake dials the relay server, creates a yamux session,
+// and performs the tunnel handshake. The caller is responsible for
+// closing the returned connection and session.
+func connectAndHandshake(serverAddr string, localPort int, basicAuth string, tunnelReq *protocol.TunnelRequest) (net.Conn, *yamux.Session, *protocol.TunnelResponse, error) {
 	conn, err := net.Dial("tcp", serverAddr)
 	if err != nil {
-		return fmt.Errorf("failed to connect to relay server at %s: %w", serverAddr, err)
+		return nil, nil, nil, fmt.Errorf("failed to connect to relay server at %s: %w", serverAddr, err)
 	}
-	defer conn.Close()
 	slog.Info("connected to relay server", "addr", serverAddr)
 
 	session, err := tunnel.NewClientSession(conn)
 	if err != nil {
-		return fmt.Errorf("failed to create yamux session: %w", err)
+		conn.Close()
+		return nil, nil, nil, fmt.Errorf("failed to create yamux session: %w", err)
 	}
-	defer session.Close()
 
-	// Open a control stream and perform the handshake.
 	controlStream, err := session.Open()
 	if err != nil {
-		return fmt.Errorf("failed to open control stream: %w", err)
+		session.Close()
+		conn.Close()
+		return nil, nil, nil, fmt.Errorf("failed to open control stream: %w", err)
 	}
 
-	req := &protocol.TunnelRequest{Protocol: protocol.ProtoHTTP, LocalPort: localPort, BasicAuth: basicAuth}
-	if err := protocol.WriteRequest(controlStream, req); err != nil {
-		return fmt.Errorf("failed to send tunnel request: %w", err)
+	if err := protocol.WriteRequest(controlStream, tunnelReq); err != nil {
+		controlStream.Close()
+		session.Close()
+		conn.Close()
+		return nil, nil, nil, fmt.Errorf("failed to send tunnel request: %w", err)
 	}
 
 	resp, err := protocol.ReadResponse(controlStream)
 	if err != nil {
-		return fmt.Errorf("failed to read tunnel response: %w", err)
+		controlStream.Close()
+		session.Close()
+		conn.Close()
+		return nil, nil, nil, fmt.Errorf("failed to read tunnel response: %w", err)
 	}
 	controlStream.Close()
 
 	if !resp.Success {
-		return fmt.Errorf("tunnel creation failed: %s", resp.Error)
+		session.Close()
+		conn.Close()
+		return nil, nil, nil, fmt.Errorf("tunnel creation failed: %s", resp.Error)
 	}
 
-	logger := inspector.NewLogger()
-	inspectorAddr, inspectorErr := cliStartInspector(logger)
+	return conn, session, resp, nil
+}
 
-	tunnelURL := resp.URL
-	if tunnelURL == "" {
-		tunnelURL = fmt.Sprintf("http://%s.localhost:8080", resp.Subdomain)
-	}
-
+// printHTTPStatus prints the startup banner for an HTTP tunnel.
+func printHTTPStatus(tunnelURL string, localPort int, basicAuth string, inspectorAddr string, inspectorErr error) {
 	fmt.Println()
 	fmt.Println("Ratatosk                        (Ctrl+C to quit)")
 	fmt.Println()
@@ -249,7 +256,11 @@ func runClient(serverAddr string, localPort int, basicAuth string) error {
 		fmt.Printf("Web Interface   http://%s\n", inspectorAddr)
 	}
 	fmt.Println()
+}
 
+// acceptHTTPStreams accepts yamux streams and proxies each one to the
+// local address via the inspector.
+func acceptHTTPStreams(session *yamux.Session, localAddr string, logger *inspector.Logger) {
 	for {
 		stream, err := session.Accept()
 		if err != nil {
@@ -258,10 +269,34 @@ func runClient(serverAddr string, localPort int, basicAuth string) error {
 			} else {
 				slog.Error("session error", "error", err)
 			}
-			return nil
+			return
 		}
 		go handleStream(stream, localAddr, logger)
 	}
+}
+
+func runClient(serverAddr string, localPort int, basicAuth string) error {
+	tunnelReq := &protocol.TunnelRequest{Protocol: protocol.ProtoHTTP, LocalPort: localPort, BasicAuth: basicAuth}
+	conn, session, resp, err := connectAndHandshake(serverAddr, localPort, basicAuth, tunnelReq)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	defer session.Close()
+
+	logger := inspector.NewLogger()
+	inspectorAddr, inspectorErr := cliStartInspector(logger)
+
+	tunnelURL := resp.URL
+	if tunnelURL == "" {
+		tunnelURL = fmt.Sprintf("http://%s.localhost:8080", resp.Subdomain)
+	}
+
+	printHTTPStatus(tunnelURL, localPort, basicAuth, inspectorAddr, inspectorErr)
+
+	localAddr := fmt.Sprintf("localhost:%d", localPort)
+	acceptHTTPStreams(session, localAddr, logger)
+	return nil
 }
 
 func handleStream(stream net.Conn, localAddr string, logger *inspector.Logger) {

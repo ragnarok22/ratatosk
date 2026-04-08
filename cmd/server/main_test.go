@@ -267,6 +267,238 @@ func TestStartControlPlane(t *testing.T) {
 	close(stop)
 }
 
+func TestStartControlPlaneAcceptError(t *testing.T) {
+	oldCfg := cfg
+	cfg = &config.ServerConfig{ControlPort: 7000}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	stop := make(chan struct{})
+	listener := newErrorThenCloseListener(errors.New("accept failed"))
+
+	if err := startControlPlane(stop, func(network, address string) (net.Listener, error) {
+		return listener, nil
+	}); err != nil {
+		t.Fatalf("startControlPlane: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		listener.mu.Lock()
+		sent := listener.sent
+		listener.mu.Unlock()
+		if sent {
+			close(stop)
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	close(stop)
+	t.Fatal("accept loop did not observe listener error")
+}
+
+func TestRunMainStartControlPlaneError(t *testing.T) {
+	oldCfg := cfg
+	oldStartControlPlane := serverStartControlPlane
+	oldStartAdminServer := serverStartAdminServer
+	oldStartPublicServer := serverStartPublicServer
+	t.Cleanup(func() {
+		cfg = oldCfg
+		serverStartControlPlane = oldStartControlPlane
+		serverStartAdminServer = oldStartAdminServer
+		serverStartPublicServer = oldStartPublicServer
+	})
+
+	wantErr := errors.New("control plane failed")
+	serverStartControlPlane = func(stop <-chan struct{}, listen func(network, address string) (net.Listener, error)) error {
+		return wantErr
+	}
+	serverStartAdminServer = func(stop <-chan struct{}, serve func(addr string, handler http.Handler) error) <-chan error {
+		t.Fatal("serverStartAdminServer should not be called")
+		return nil
+	}
+	serverStartPublicServer = func(stop <-chan struct{}, serve func(addr string, handler http.Handler) error, serveTLS func(addr, certFile, keyFile string, handler http.Handler) error) <-chan error {
+		t.Fatal("serverStartPublicServer should not be called")
+		return nil
+	}
+
+	code := runMain(io.Discard, func() (*config.ServerConfig, error) {
+		return &config.ServerConfig{
+			BaseDomain:     "localhost",
+			PublicPort:     8080,
+			AdminPort:      8081,
+			ControlPort:    7000,
+			PortRangeStart: 33000,
+			PortRangeEnd:   33010,
+		}, nil
+	}, nil, nil, nil)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+}
+
+func TestRunMainAdminServerError(t *testing.T) {
+	oldCfg := cfg
+	oldStartControlPlane := serverStartControlPlane
+	oldStartAdminServer := serverStartAdminServer
+	oldStartPublicServer := serverStartPublicServer
+	t.Cleanup(func() {
+		cfg = oldCfg
+		serverStartControlPlane = oldStartControlPlane
+		serverStartAdminServer = oldStartAdminServer
+		serverStartPublicServer = oldStartPublicServer
+	})
+
+	serverStartControlPlane = func(stop <-chan struct{}, listen func(network, address string) (net.Listener, error)) error {
+		return nil
+	}
+	serverStartAdminServer = func(stop <-chan struct{}, serve func(addr string, handler http.Handler) error) <-chan error {
+		errs := make(chan error, 1)
+		errs <- errors.New("admin failed")
+		return errs
+	}
+	serverStartPublicServer = func(stop <-chan struct{}, serve func(addr string, handler http.Handler) error, serveTLS func(addr, certFile, keyFile string, handler http.Handler) error) <-chan error {
+		return make(chan error)
+	}
+
+	code := runMain(io.Discard, func() (*config.ServerConfig, error) {
+		return &config.ServerConfig{
+			BaseDomain:     "localhost",
+			PublicPort:     8080,
+			AdminPort:      8081,
+			ControlPort:    7000,
+			PortRangeStart: 33000,
+			PortRangeEnd:   33010,
+		}, nil
+	}, nil, nil, nil)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+}
+
+func TestRunMainPublicHTTPServerError(t *testing.T) {
+	oldCfg := cfg
+	oldStartControlPlane := serverStartControlPlane
+	oldStartAdminServer := serverStartAdminServer
+	oldStartPublicServer := serverStartPublicServer
+	t.Cleanup(func() {
+		cfg = oldCfg
+		serverStartControlPlane = oldStartControlPlane
+		serverStartAdminServer = oldStartAdminServer
+		serverStartPublicServer = oldStartPublicServer
+	})
+
+	serverStartControlPlane = func(stop <-chan struct{}, listen func(network, address string) (net.Listener, error)) error {
+		return nil
+	}
+	serverStartAdminServer = func(stop <-chan struct{}, serve func(addr string, handler http.Handler) error) <-chan error {
+		return make(chan error)
+	}
+	serverStartPublicServer = func(stop <-chan struct{}, serve func(addr string, handler http.Handler) error, serveTLS func(addr, certFile, keyFile string, handler http.Handler) error) <-chan error {
+		errs := make(chan error, 1)
+		errs <- errors.New("public http failed")
+		return errs
+	}
+
+	code := runMain(io.Discard, func() (*config.ServerConfig, error) {
+		return &config.ServerConfig{
+			BaseDomain:     "localhost",
+			PublicPort:     8080,
+			AdminPort:      8081,
+			ControlPort:    7000,
+			PortRangeStart: 33000,
+			PortRangeEnd:   33010,
+		}, nil
+	}, nil, nil, nil)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+}
+
+func TestRunMainPublicHTTPSServerError(t *testing.T) {
+	oldCfg := cfg
+	oldStartControlPlane := serverStartControlPlane
+	oldStartAdminServer := serverStartAdminServer
+	oldStartPublicServer := serverStartPublicServer
+	t.Cleanup(func() {
+		cfg = oldCfg
+		serverStartControlPlane = oldStartControlPlane
+		serverStartAdminServer = oldStartAdminServer
+		serverStartPublicServer = oldStartPublicServer
+	})
+
+	serverStartControlPlane = func(stop <-chan struct{}, listen func(network, address string) (net.Listener, error)) error {
+		return nil
+	}
+	serverStartAdminServer = func(stop <-chan struct{}, serve func(addr string, handler http.Handler) error) <-chan error {
+		return make(chan error)
+	}
+	serverStartPublicServer = func(stop <-chan struct{}, serve func(addr string, handler http.Handler) error, serveTLS func(addr, certFile, keyFile string, handler http.Handler) error) <-chan error {
+		errs := make(chan error, 1)
+		errs <- errors.New("public https failed")
+		return errs
+	}
+
+	code := runMain(io.Discard, func() (*config.ServerConfig, error) {
+		return &config.ServerConfig{
+			BaseDomain:     "localhost",
+			PublicPort:     443,
+			AdminPort:      8081,
+			ControlPort:    7000,
+			PortRangeStart: 33000,
+			PortRangeEnd:   33010,
+			TLSEnabled:     true,
+		}, nil
+	}, nil, nil, nil)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+}
+
+func TestRunMainReturnsZeroOnServerNilError(t *testing.T) {
+	oldCfg := cfg
+	oldStartControlPlane := serverStartControlPlane
+	oldStartAdminServer := serverStartAdminServer
+	oldStartPublicServer := serverStartPublicServer
+	t.Cleanup(func() {
+		cfg = oldCfg
+		serverStartControlPlane = oldStartControlPlane
+		serverStartAdminServer = oldStartAdminServer
+		serverStartPublicServer = oldStartPublicServer
+	})
+
+	serverStartControlPlane = func(stop <-chan struct{}, listen func(network, address string) (net.Listener, error)) error {
+		return nil
+	}
+	serverStartAdminServer = func(stop <-chan struct{}, serve func(addr string, handler http.Handler) error) <-chan error {
+		errs := make(chan error, 1)
+		errs <- nil
+		return errs
+	}
+	serverStartPublicServer = func(stop <-chan struct{}, serve func(addr string, handler http.Handler) error, serveTLS func(addr, certFile, keyFile string, handler http.Handler) error) <-chan error {
+		return make(chan error)
+	}
+
+	code := runMain(io.Discard, func() (*config.ServerConfig, error) {
+		return &config.ServerConfig{
+			BaseDomain:     "localhost",
+			PublicPort:     8080,
+			AdminPort:      8081,
+			ControlPort:    7000,
+			PortRangeStart: 33000,
+			PortRangeEnd:   33010,
+		}, nil
+	}, nil, nil, nil)
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0", code)
+	}
+}
+
 func TestStartAdminServer(t *testing.T) {
 	oldCfg := cfg
 	cfg = &config.ServerConfig{AdminPort: 8081}

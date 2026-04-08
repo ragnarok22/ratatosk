@@ -31,6 +31,9 @@ bin/
 .env.*
 !.env.example
 
+# Claude Code
+.claude/worktrees/
+
 # Docs (VitePress)
 docs/node_modules/
 docs/.vitepress/dist/
