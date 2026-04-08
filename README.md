@@ -73,6 +73,7 @@ make coverage      # generate and display coverage report
 ## Community
 
 Please read the [Code of Conduct](./CODE_OF_CONDUCT.md) before participating in issues, pull requests, or discussions.
+Contribution workflow and expectations are documented in [CONTRIBUTING.md](./CONTRIBUTING.md).
 For responsible vulnerability disclosure, see the [Security Policy](./SECURITY.md).
 
 ## Build
