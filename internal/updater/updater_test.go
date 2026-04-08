@@ -2,7 +2,9 @@ package updater
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"runtime"
@@ -340,5 +342,160 @@ func TestFetchLatestVersionFromURLInvalidJSON(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "failed to parse") {
 		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestUpdateCLIExecutableError(t *testing.T) {
+	oldFetchLatest := updaterFetchLatest
+	oldExecutable := updaterExecutable
+	t.Cleanup(func() {
+		updaterFetchLatest = oldFetchLatest
+		updaterExecutable = oldExecutable
+	})
+
+	updaterFetchLatest = func(*http.Client) (string, error) { return "v2.0.0", nil }
+	updaterExecutable = func() (string, error) { return "", errors.New("boom") }
+
+	err := UpdateCLI("v1.0.0")
+	if err == nil {
+		t.Fatal("expected executable lookup error")
+	}
+	if !strings.Contains(err.Error(), "failed to determine executable path") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestUpdateCLIEvalSymlinksError(t *testing.T) {
+	oldFetchLatest := updaterFetchLatest
+	oldExecutable := updaterExecutable
+	oldEvalSymlinks := updaterEvalSymlinks
+	t.Cleanup(func() {
+		updaterFetchLatest = oldFetchLatest
+		updaterExecutable = oldExecutable
+		updaterEvalSymlinks = oldEvalSymlinks
+	})
+
+	updaterFetchLatest = func(*http.Client) (string, error) { return "v2.0.0", nil }
+	updaterExecutable = func() (string, error) { return "/tmp/ratatosk", nil }
+	updaterEvalSymlinks = func(string) (string, error) { return "", errors.New("symlink failed") }
+
+	err := UpdateCLI("v1.0.0")
+	if err == nil {
+		t.Fatal("expected symlink resolution error")
+	}
+	if !strings.Contains(err.Error(), "failed to resolve executable path") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestUpdateCLIHomebrewInstall(t *testing.T) {
+	oldFetchLatest := updaterFetchLatest
+	oldExecutable := updaterExecutable
+	oldEvalSymlinks := updaterEvalSymlinks
+	oldHTTPGet := updaterHTTPGet
+	t.Cleanup(func() {
+		updaterFetchLatest = oldFetchLatest
+		updaterExecutable = oldExecutable
+		updaterEvalSymlinks = oldEvalSymlinks
+		updaterHTTPGet = oldHTTPGet
+	})
+
+	downloadCalled := false
+	updaterFetchLatest = func(*http.Client) (string, error) { return "v2.0.0", nil }
+	updaterExecutable = func() (string, error) { return "/tmp/ratatosk", nil }
+	updaterEvalSymlinks = func(string) (string, error) {
+		return "/opt/homebrew/Cellar/ratatosk/2.0.0/bin/ratatosk", nil
+	}
+	updaterHTTPGet = func(string) (*http.Response, error) {
+		downloadCalled = true
+		return nil, errors.New("should not download homebrew install")
+	}
+
+	if err := UpdateCLI("v1.0.0"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if downloadCalled {
+		t.Fatal("download should not be attempted for Homebrew install")
+	}
+}
+
+func TestUpdateCLIApplyError(t *testing.T) {
+	oldFetchLatest := updaterFetchLatest
+	oldExecutable := updaterExecutable
+	oldEvalSymlinks := updaterEvalSymlinks
+	oldHTTPGet := updaterHTTPGet
+	oldApplyUpdate := updaterApplyUpdate
+	t.Cleanup(func() {
+		updaterFetchLatest = oldFetchLatest
+		updaterExecutable = oldExecutable
+		updaterEvalSymlinks = oldEvalSymlinks
+		updaterHTTPGet = oldHTTPGet
+		updaterApplyUpdate = oldApplyUpdate
+	})
+
+	updaterFetchLatest = func(*http.Client) (string, error) { return "v2.0.0", nil }
+	updaterExecutable = func() (string, error) { return "/tmp/ratatosk", nil }
+	updaterEvalSymlinks = func(string) (string, error) { return "/tmp/ratatosk", nil }
+	updaterHTTPGet = func(string) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("payload")),
+		}, nil
+	}
+	updaterApplyUpdate = func(r io.Reader) error {
+		data, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatalf("ReadAll: %v", err)
+		}
+		if string(data) != "payload" {
+			t.Fatalf("payload = %q, want %q", string(data), "payload")
+		}
+		return errors.New("apply failed")
+	}
+
+	err := UpdateCLI("v1.0.0")
+	if err == nil {
+		t.Fatal("expected apply error")
+	}
+	if !strings.Contains(err.Error(), "failed to apply update") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestUpdateCLISuccess(t *testing.T) {
+	oldFetchLatest := updaterFetchLatest
+	oldExecutable := updaterExecutable
+	oldEvalSymlinks := updaterEvalSymlinks
+	oldHTTPGet := updaterHTTPGet
+	oldApplyUpdate := updaterApplyUpdate
+	t.Cleanup(func() {
+		updaterFetchLatest = oldFetchLatest
+		updaterExecutable = oldExecutable
+		updaterEvalSymlinks = oldEvalSymlinks
+		updaterHTTPGet = oldHTTPGet
+		updaterApplyUpdate = oldApplyUpdate
+	})
+
+	applied := false
+	updaterFetchLatest = func(*http.Client) (string, error) { return "v2.0.0", nil }
+	updaterExecutable = func() (string, error) { return "/tmp/ratatosk", nil }
+	updaterEvalSymlinks = func(string) (string, error) { return "/tmp/ratatosk", nil }
+	updaterHTTPGet = func(string) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader("payload")),
+		}, nil
+	}
+	updaterApplyUpdate = func(r io.Reader) error {
+		applied = true
+		_, err := io.ReadAll(r)
+		return err
+	}
+
+	if err := UpdateCLI("v1.0.0"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !applied {
+		t.Fatal("update payload was not applied")
 	}
 }

@@ -2,11 +2,53 @@ package tunnel
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
+
+type acceptErrorListener struct {
+	closed chan struct{}
+	err    error
+	mu     sync.Mutex
+	sent   bool
+}
+
+func newAcceptErrorListener(err error) *acceptErrorListener {
+	return &acceptErrorListener{
+		closed: make(chan struct{}),
+		err:    err,
+	}
+}
+
+func (l *acceptErrorListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	if !l.sent {
+		l.sent = true
+		l.mu.Unlock()
+		return nil, l.err
+	}
+	l.mu.Unlock()
+
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *acceptErrorListener) Close() error {
+	select {
+	case <-l.closed:
+	default:
+		close(l.closed)
+	}
+	return nil
+}
+
+func (l *acceptErrorListener) Addr() net.Addr {
+	return stubAddr("127.0.0.1:0")
+}
 
 func TestProxyTCPConnBidirectional(t *testing.T) {
 	// Create a yamux session pair over net.Pipe.
@@ -127,4 +169,70 @@ func TestServeTCPAcceptLoop(t *testing.T) {
 
 	cancel()
 	ln.Close()
+}
+
+func TestServeTCPAcceptError(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	listener := newAcceptErrorListener(errors.New("accept failed"))
+
+	done := make(chan struct{})
+	go func() {
+		ServeTCP(ctx, listener, nil)
+		close(done)
+	}()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		listener.mu.Lock()
+		sent := listener.sent
+		listener.mu.Unlock()
+		if sent {
+			cancel()
+			listener.Close()
+			select {
+			case <-done:
+				return
+			case <-time.After(2 * time.Second):
+				t.Fatal("ServeTCP did not stop after cancel")
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	cancel()
+	listener.Close()
+	t.Fatal("ServeTCP did not observe accept error")
+}
+
+func TestProxyTCPConnOpenError(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	serverSession, err := NewServerSession(serverConn)
+	if err != nil {
+		t.Fatalf("NewServerSession: %v", err)
+	}
+	clientSession, err := NewClientSession(clientConn)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+
+	clientSession.Close()
+	serverSession.Close()
+
+	publicConn, publicRemote := net.Pipe()
+	defer publicConn.Close()
+
+	done := make(chan struct{})
+	go func() {
+		proxyTCPConn(publicRemote, serverSession)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxyTCPConn did not return when session open failed")
+	}
 }
