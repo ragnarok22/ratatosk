@@ -8,18 +8,25 @@ import (
 	"testing"
 )
 
-func TestLoadConfigDefaults(t *testing.T) {
-	// Ensure no config file or env vars interfere.
+func clearConfigEnv(t *testing.T) {
+	t.Helper()
+
 	for _, key := range []string{
 		"RATATOSK_BASE_DOMAIN",
 		"RATATOSK_PUBLIC_PORT",
 		"RATATOSK_ADMIN_PORT",
 		"RATATOSK_CONTROL_PORT",
 		"RATATOSK_TLS_ENABLED",
+		"RATATOSK_PORT_RANGE_START",
+		"RATATOSK_PORT_RANGE_END",
 	} {
 		t.Setenv(key, "")
-		os.Unsetenv(key)
 	}
+}
+
+func TestLoadConfigDefaults(t *testing.T) {
+	// Ensure no config file or env vars interfere.
+	clearConfigEnv(t)
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -131,6 +138,101 @@ tls_key_file: /etc/ssl/key.pem
 	}
 	if cfg.TLSKeyFile != "/etc/ssl/key.pem" {
 		t.Errorf("TLSKeyFile = %q, want %q", cfg.TLSKeyFile, "/etc/ssl/key.pem")
+	}
+}
+
+func TestLoadConfigSearchPathAndPrecedence(t *testing.T) {
+	tests := []struct {
+		name            string
+		fileContent     string
+		env             map[string]string
+		wantBaseDomain  string
+		wantPublicPort  int
+		wantAdminPort   int
+		wantControlPort int
+		wantTLSEnabled  bool
+	}{
+		{
+			name: "loads from home directory config path",
+			fileContent: `base_domain: home.tunnel.dev
+public_port: 9443
+admin_port: 9092
+control_port: 7100
+tls_enabled: true
+`,
+			wantBaseDomain:  "home.tunnel.dev",
+			wantPublicPort:  9443,
+			wantAdminPort:   9092,
+			wantControlPort: 7100,
+			wantTLSEnabled:  true,
+		},
+		{
+			name: "environment variables override file values",
+			fileContent: `base_domain: file.tunnel.dev
+public_port: 8088
+admin_port: 8089
+control_port: 7099
+tls_enabled: false
+`,
+			env: map[string]string{
+				"RATATOSK_BASE_DOMAIN": "env.tunnel.dev",
+				"RATATOSK_PUBLIC_PORT": "443",
+				"RATATOSK_TLS_ENABLED": "true",
+			},
+			wantBaseDomain:  "env.tunnel.dev",
+			wantPublicPort:  443,
+			wantAdminPort:   8089,
+			wantControlPort: 7099,
+			wantTLSEnabled:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			homeDir := t.TempDir()
+			configDir := filepath.Join(homeDir, ".ratatosk")
+			if err := os.MkdirAll(configDir, 0o755); err != nil {
+				t.Fatalf("Mkdir: %v", err)
+			}
+			if err := os.WriteFile(filepath.Join(configDir, "ratatosk.yaml"), []byte(tt.fileContent), 0o644); err != nil {
+				t.Fatalf("WriteFile: %v", err)
+			}
+
+			// Move to an unrelated directory to prove the home-directory search path is used.
+			orig, _ := os.Getwd()
+			emptyDir := t.TempDir()
+			if err := os.Chdir(emptyDir); err != nil {
+				t.Fatalf("Chdir: %v", err)
+			}
+			t.Cleanup(func() { _ = os.Chdir(orig) })
+
+			t.Setenv("HOME", homeDir)
+			clearConfigEnv(t)
+			for key, value := range tt.env {
+				t.Setenv(key, value)
+			}
+
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+
+			if cfg.BaseDomain != tt.wantBaseDomain {
+				t.Errorf("BaseDomain = %q, want %q", cfg.BaseDomain, tt.wantBaseDomain)
+			}
+			if cfg.PublicPort != tt.wantPublicPort {
+				t.Errorf("PublicPort = %d, want %d", cfg.PublicPort, tt.wantPublicPort)
+			}
+			if cfg.AdminPort != tt.wantAdminPort {
+				t.Errorf("AdminPort = %d, want %d", cfg.AdminPort, tt.wantAdminPort)
+			}
+			if cfg.ControlPort != tt.wantControlPort {
+				t.Errorf("ControlPort = %d, want %d", cfg.ControlPort, tt.wantControlPort)
+			}
+			if cfg.TLSEnabled != tt.wantTLSEnabled {
+				t.Errorf("TLSEnabled = %t, want %t", cfg.TLSEnabled, tt.wantTLSEnabled)
+			}
+		})
 	}
 }
 
