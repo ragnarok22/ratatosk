@@ -87,6 +87,7 @@ Full documentation is available at **[ragnarok22.github.io/ratatosk](https://rag
 - [Getting Started](https://ragnarok22.github.io/ratatosk/guide/getting-started) -- create your first tunnel
 - [Deployment](https://ragnarok22.github.io/ratatosk/guide/deployment) -- DNS, TLS, systemd, and Docker on a VPS
 - [Homelab & Smart Home](https://ragnarok22.github.io/ratatosk/guide/homelab) -- Docker Compose, Home Assistant add-on
+- [Development](https://ragnarok22.github.io/ratatosk/guide/development) -- project structure, Make targets, testing
 - [CLI Commands](https://ragnarok22.github.io/ratatosk/reference/cli-commands) -- flags, subcommands, and examples
 - [Configuration](https://ragnarok22.github.io/ratatosk/reference/configuration) -- YAML config and environment variables
 - [Architecture](https://ragnarok22.github.io/ratatosk/reference/architecture) -- request flow and design decisions

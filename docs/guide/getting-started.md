@@ -113,23 +113,9 @@ ratatosk --port 3000 --streamer
 
 See [CLI Commands > --streamer](/reference/cli-commands#streamer) for the full list of redacted patterns.
 
-## Local Development
-
-To run both the server and client locally for development:
-
-```sh
-# Terminal 1: Start the relay server (builds the dashboard first)
-make dev-server
-
-# Terminal 2: Connect the CLI client
-make dev-cli
-
-# Terminal 3 (optional): Vite dev server with hot-reload for the dashboard
-make dev-dashboard
-```
-
 ## What's Next?
 
 - Learn about all available [CLI Commands](/reference/cli-commands).
 - Configure the server with a [config file](/reference/configuration).
 - Deploy to production with TLS and a custom domain following the [Deployment](/guide/deployment) guide.
+- Set up a local dev environment with the [Development](/guide/development) guide.
