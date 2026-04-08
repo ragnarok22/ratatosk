@@ -7,7 +7,8 @@ Configuring the public infrastructure — especially Wildcard certificates — i
 - A VPS with a public IP address (e.g. `1.2.3.4`)
 - A domain you control (e.g. `yourdomain.com`)
 - SSH access to the VPS
-- `certbot` installed on the VPS (`sudo apt install certbot` on Debian/Ubuntu)
+- For manual TLS: `certbot` installed on the VPS (`sudo apt install certbot` on Debian/Ubuntu)
+- For automatic TLS: a Cloudflare API token with Zone:DNS:Edit permissions
 
 ## Step 1: Configure DNS Records
 
@@ -75,6 +76,41 @@ What happens next:
 >   -d "*.tunnel.yourdomain.com"
 > ```
 
+## Alternative: Automatic TLS (Skip Steps 2 and Cert Config)
+
+Instead of managing certificates manually with certbot, Ratatosk can automatically provision and renew Let's Encrypt wildcard certificates using DNS-01 challenges. This is the recommended approach -- no certbot required.
+
+You just need a Cloudflare API token with **Zone:DNS:Edit** permissions for your domain. Create one at [Cloudflare Dashboard > API Tokens](https://dash.cloudflare.com/profile/api-tokens).
+
+Skip Step 2 entirely and use this config in Step 4 instead:
+
+```yaml
+base_domain: tunnel.yourdomain.com
+public_port: 443
+admin_port: 8081
+control_port: 7000
+
+tls_auto: true
+tls_email: you@yourdomain.com
+tls_provider: cloudflare
+tls_api_token: your-cloudflare-api-token
+```
+
+Or via environment variables (recommended for the API token):
+
+```sh
+export RATATOSK_TLS_AUTO=true
+export RATATOSK_TLS_EMAIL=you@yourdomain.com
+export RATATOSK_TLS_PROVIDER=cloudflare
+export RATATOSK_TLS_API_TOKEN=your-cloudflare-api-token
+```
+
+On first startup, the server will solve DNS challenges and provision the certificate automatically. This may take 30-60 seconds. Subsequent starts use the cached certificate. Certificates are stored under `$XDG_DATA_HOME/certmagic` (defaults to `~/.local/share/certmagic`).
+
+::: tip
+With automatic TLS, you don't need to install certbot, set filesystem ACLs for certificate files, or worry about renewal -- it's all handled for you.
+:::
+
 ## Step 3: Build and Upload the Binary
 
 On your local machine, cross-compile for Linux:
@@ -102,10 +138,26 @@ sudo chmod +x /usr/local/bin/ratatosk-server
 Create the config directory and file:
 
 ```sh
-sudo mkdir -p /etc/ratatosk /var/log/ratatosk
+sudo mkdir -p /etc/ratatosk /var/log/ratatosk /var/lib/ratatosk
 ```
 
-Create `/etc/ratatosk/ratatosk.yaml` with your production values:
+Create `/etc/ratatosk/ratatosk.yaml` with your production values.
+
+**With automatic TLS (recommended):**
+
+```yaml
+base_domain: tunnel.yourdomain.com
+public_port: 443
+admin_port: 8081
+control_port: 7000
+
+tls_auto: true
+tls_email: you@yourdomain.com
+tls_provider: cloudflare
+tls_api_token: your-cloudflare-api-token
+```
+
+**With manual TLS (certbot):**
 
 ```yaml
 base_domain: tunnel.yourdomain.com
@@ -275,8 +327,12 @@ sudo ufw allow 7000/tcp   # if using ufw
 
 **Certificate renewal**
 
-Let's Encrypt certificates expire every 90 days. If you used the Cloudflare DNS plugin, `certbot renew` runs automatically via a systemd timer. For manual DNS challenges, you'll need to repeat the process. After renewal, restart the server:
+If using `tls_auto`, certificates are renewed automatically by the server -- no action needed. If using manual TLS with certbot, Let's Encrypt certificates expire every 90 days. If you used the Cloudflare DNS plugin, `certbot renew` runs automatically via a systemd timer. For manual DNS challenges, you'll need to repeat the process. After renewal, restart the server:
 
 ```sh
 sudo systemctl restart ratatosk
 ```
+
+**Automatic TLS: "first startup is slow"**
+
+When using `tls_auto`, the first startup may take 30-60 seconds while DNS challenges propagate. This is normal. Subsequent starts use the cached certificate and are instant. Check logs with `journalctl -u ratatosk -f` to see the progress.

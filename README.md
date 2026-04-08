@@ -30,6 +30,7 @@ Open-source, self-hosted reverse proxy and tunneling tool. Expose local web serv
 - **HTTP, TCP, and UDP tunnels** -- expose web apps, SSH, databases, game servers, and more.
 - **Single binary** -- the relay server ships with an embedded React dashboard; no separate frontend install.
 - **Multiplexed connections** -- one outbound TCP connection handles thousands of concurrent requests via [yamux](https://github.com/hashicorp/yamux).
+- **Automatic TLS** -- built-in Let's Encrypt wildcard certificates via DNS-01 challenges (Cloudflare). No certbot needed.
 - **Basic Auth** -- protect HTTP tunnels with a username and password.
 - **Streamer mode** -- redact IPs, tokens, and file paths from output with `--streamer`.
 - **Self-update** -- the CLI can update itself with `ratatosk self-update`.
