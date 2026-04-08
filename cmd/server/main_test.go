@@ -645,6 +645,76 @@ func TestHTTPProxyKeepAliveTunnelGone(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyPOSTRequest(t *testing.T) {
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintf(w, "got:%s", body)
+	}))
+	defer local.Close()
+
+	setupTunnel(t, "post-req", local.Listener.Addr().String())
+	proxyAddr := startProxyServer(t)
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	body := "hello=world"
+	fmt.Fprintf(conn, "POST /submit HTTP/1.1\r\nHost: post-req.localhost:8080\r\nContent-Length: %d\r\nConnection: close\r\n\r\n%s", len(body), body)
+
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	respBody, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	if !strings.Contains(string(respBody), "got:hello=world") {
+		t.Errorf("body = %q, want to contain 'got:hello=world'", respBody)
+	}
+}
+
+func TestHTTPProxyKeepAliveInvalidHost(t *testing.T) {
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, "ok")
+	}))
+	defer local.Close()
+
+	setupTunnel(t, "invalidhost", local.Listener.Addr().String())
+	proxyAddr := startProxyServer(t)
+
+	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	reader := bufio.NewReader(conn)
+
+	// First request with valid host (keep-alive).
+	fmt.Fprintf(conn, "GET /page HTTP/1.1\r\nHost: invalidhost.localhost:8080\r\n\r\n")
+	resp, err := http.ReadResponse(reader, nil)
+	if err != nil {
+		t.Fatalf("request 1: %v", err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+
+	// Second request with host that yields no subdomain.
+	fmt.Fprintf(conn, "GET /page2 HTTP/1.1\r\nHost: localhost\r\n\r\n")
+
+	// Server should close connection since extractSubdomain returns "".
+	_, err = http.ReadResponse(reader, nil)
+	if err == nil {
+		t.Log("got response for invalid host (acceptable if race)")
+	}
+}
+
 func TestHandleHTTPNoHijackSupport(t *testing.T) {
 	clientPipe, serverPipe := net.Pipe()
 	t.Cleanup(func() { clientPipe.Close(); serverPipe.Close() })

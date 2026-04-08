@@ -108,6 +108,61 @@ func TestHandleStreamLocalServerDown(t *testing.T) {
 	}
 }
 
+func TestHandleStreamBinaryResponse(t *testing.T) {
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Write([]byte{0x89, 0x50, 0x4E, 0x47})
+	}))
+	defer local.Close()
+	localAddr := strings.TrimPrefix(local.URL, "http://")
+
+	logger := NewLogger()
+	clientConn, serverConn := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		HandleStream(serverConn, localAddr, logger)
+		serverConn.Close()
+	}()
+
+	clientConn.Write([]byte("GET /image.png HTTP/1.1\r\nHost: example.com\r\nContent-Length: 0\r\n\r\n"))
+
+	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	resp.Body.Close()
+	clientConn.Close()
+	<-done
+
+	entries := logger.Entries()
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 entry, got %d", len(entries))
+	}
+	if !entries[0].RespBodyBinary {
+		t.Error("expected RespBodyBinary to be true for image/png")
+	}
+}
+
+func TestHandleStreamBadRequest(t *testing.T) {
+	logger := NewLogger()
+	clientConn, serverConn := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		HandleStream(serverConn, "127.0.0.1:1", logger)
+		serverConn.Close()
+	}()
+
+	clientConn.Write([]byte("not an http request\r\n\r\n"))
+	clientConn.Close()
+	<-done
+
+	if len(logger.Entries()) != 0 {
+		t.Errorf("expected 0 entries for bad request, got %d", len(logger.Entries()))
+	}
+}
+
 func TestFlattenHeaders(t *testing.T) {
 	h := http.Header{
 		"Content-Type": {"application/json"},

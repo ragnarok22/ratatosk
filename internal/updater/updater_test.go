@@ -262,6 +262,28 @@ func TestUpdateCLINewerVersionDownloadError(t *testing.T) {
 	}
 }
 
+func TestFetchLatestVersionFromURLTransportError(t *testing.T) {
+	client := &http.Client{
+		Transport: transportFunc(func(req *http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf("simulated transport error")
+		}),
+	}
+	_, err := fetchLatestVersionFromURL(client, "http://example.com/api")
+	if err == nil {
+		t.Fatal("expected error for transport failure")
+	}
+	if !strings.Contains(err.Error(), "failed to reach GitHub API") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestFetchLatestVersionFromURLBadURL(t *testing.T) {
+	_, err := fetchLatestVersionFromURL(http.DefaultClient, "://bad-url")
+	if err == nil {
+		t.Fatal("expected error for bad URL")
+	}
+}
+
 func TestFetchLatestVersionFromURLServerError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)
