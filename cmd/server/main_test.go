@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 
 	"ratatosk/internal/inspector"
@@ -370,5 +371,146 @@ func TestAdminDashboardFallback(t *testing.T) {
 
 	if w.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestSpaHandler(t *testing.T) {
+	fsys := fstest.MapFS{
+		"index.html":       {Data: []byte("<html>SPA</html>")},
+		"assets/style.css": {Data: []byte("body{color:red}")},
+	}
+	handler := spaHandler(fsys)
+
+	t.Run("root", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest("GET", "/", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "SPA") {
+			t.Errorf("body = %q, want to contain 'SPA'", w.Body.String())
+		}
+	})
+
+	t.Run("static_file", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest("GET", "/assets/style.css", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "body{color:red}") {
+			t.Errorf("body = %q, want CSS content", w.Body.String())
+		}
+	})
+
+	t.Run("spa_fallback", func(t *testing.T) {
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, httptest.NewRequest("GET", "/unknown/route", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", w.Code)
+		}
+		if !strings.Contains(w.Body.String(), "SPA") {
+			t.Errorf("body = %q, want SPA fallback to index.html", w.Body.String())
+		}
+	})
+}
+
+func TestExtractSubdomainEdgeCases(t *testing.T) {
+	tests := []struct {
+		host, base, want string
+	}{
+		{"foo.localhost", "localhost", "foo"},
+		{"a.b.localhost", "localhost", ""},
+		{".localhost", "localhost", ""},
+		{"localhost", "localhost", ""},
+		{"foo.other.com", "localhost", ""},
+		{"foo.tunnel.example.com", "tunnel.example.com", "foo"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.host, func(t *testing.T) {
+			got := extractSubdomain(tt.host, tt.base)
+			if got != tt.want {
+				t.Errorf("extractSubdomain(%q, %q) = %q, want %q", tt.host, tt.base, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleConnectionClosedEarly(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	clientConn.Close()
+	t.Cleanup(func() { serverConn.Close() })
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleConnection(serverConn)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleConnection did not return after early close")
+	}
+}
+
+func TestHandleConnectionBadProtocol(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		clientConn.Close()
+		serverConn.Close()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleConnection(serverConn)
+	}()
+
+	clientSession, err := tunnel.NewClientSession(clientConn)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+
+	controlStream, err := clientSession.Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	controlStream.Write([]byte("not-json"))
+	controlStream.Close()
+	clientSession.Close()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleConnection did not return after bad protocol data")
+	}
+}
+
+func TestHandleHTTPNoHijackSupport(t *testing.T) {
+	clientPipe, serverPipe := net.Pipe()
+	t.Cleanup(func() { clientPipe.Close(); serverPipe.Close() })
+
+	serverSession, err := tunnel.NewServerSession(serverPipe)
+	if err != nil {
+		t.Fatalf("NewServerSession: %v", err)
+	}
+	registry.Register("nohijack", serverSession)
+	t.Cleanup(func() { registry.Unregister("nohijack") })
+
+	clientSession, err := tunnel.NewClientSession(clientPipe)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+	t.Cleanup(func() { clientSession.Close() })
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/", nil)
+	req.Host = "nohijack.localhost:8080"
+
+	handleHTTP(w, req)
+
+	if w.Code != http.StatusInternalServerError {
+		t.Errorf("status = %d, want 500", w.Code)
 	}
 }

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"runtime"
+	"strings"
 	"testing"
 )
 
@@ -148,4 +149,146 @@ func TestFetchLatestVersion(t *testing.T) {
 			t.Fatal("expected error for empty tag")
 		}
 	})
+}
+
+// transportFunc implements http.RoundTripper for test transport stubbing.
+type transportFunc func(*http.Request) (*http.Response, error)
+
+func (f transportFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+// stubTransport replaces http.DefaultTransport so all HTTP calls are routed
+// to srv. Returns a restore function that must be deferred.
+func stubTransport(t *testing.T, srv *httptest.Server) func() {
+	t.Helper()
+	orig := http.DefaultTransport
+	http.DefaultTransport = transportFunc(func(req *http.Request) (*http.Response, error) {
+		req2 := req.Clone(req.Context())
+		req2.URL.Scheme = "http"
+		req2.URL.Host = strings.TrimPrefix(srv.URL, "http://")
+		return orig.RoundTrip(req2)
+	})
+	return func() { http.DefaultTransport = orig }
+}
+
+func TestUpdateCLIDevBuild(t *testing.T) {
+	if err := UpdateCLI("dev"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestUpdateCLIUpToDate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(githubRelease{TagName: "v1.0.0"})
+	}))
+	defer srv.Close()
+	defer stubTransport(t, srv)()
+
+	if err := UpdateCLI("v1.0.0"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestUpdateCLIFetchError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	defer stubTransport(t, srv)()
+
+	if err := UpdateCLI("v1.0.0"); err == nil {
+		t.Fatal("expected error when API returns 500")
+	}
+}
+
+func TestUpdateCLIBadRemoteVersion(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(githubRelease{TagName: "not-a-version"})
+	}))
+	defer srv.Close()
+	defer stubTransport(t, srv)()
+
+	err := UpdateCLI("v1.0.0")
+	if err == nil {
+		t.Fatal("expected error for invalid remote version")
+	}
+	if !strings.Contains(err.Error(), "version comparison failed") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestUpdateCLINewerVersionAssetNotFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "releases/latest") {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(githubRelease{TagName: "v99.0.0"})
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	defer srv.Close()
+	defer stubTransport(t, srv)()
+
+	err := UpdateCLI("v1.0.0")
+	if err == nil {
+		t.Fatal("expected error for missing asset")
+	}
+	if !strings.Contains(err.Error(), "release asset not found") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestUpdateCLINewerVersionDownloadError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.Contains(r.URL.Path, "releases/latest") {
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(githubRelease{TagName: "v99.0.0"})
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+	defer stubTransport(t, srv)()
+
+	err := UpdateCLI("v1.0.0")
+	if err == nil {
+		t.Fatal("expected error for download failure")
+	}
+	if !strings.Contains(err.Error(), "failed to download update") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestFetchLatestVersionFromURLServerError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	_, err := fetchLatestVersionFromURL(srv.Client(), srv.URL)
+	if err == nil {
+		t.Fatal("expected error for 500 status")
+	}
+	if !strings.Contains(err.Error(), "status 500") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestFetchLatestVersionFromURLInvalidJSON(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte("not valid json"))
+	}))
+	defer srv.Close()
+
+	_, err := fetchLatestVersionFromURL(srv.Client(), srv.URL)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "failed to parse") {
+		t.Fatalf("unexpected error: %v", err)
+	}
 }
