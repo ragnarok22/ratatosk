@@ -29,6 +29,7 @@ bin/
 # Environment
 .env
 .env.*
+!.env.example
 
 # Docs (VitePress)
 docs/node_modules/
