@@ -76,11 +76,11 @@ func TestRunVersionCommand(t *testing.T) {
 }
 
 func TestMainVersionCommand(t *testing.T) {
-	oldArgs := os.Args
-	oldStdout := os.Stdout
+	oldArgs := cliArgs
+	oldStdout := cliStdout
 	t.Cleanup(func() {
-		os.Args = oldArgs
-		os.Stdout = oldStdout
+		cliArgs = oldArgs
+		cliStdout = oldStdout
 	})
 
 	r, w, err := os.Pipe()
@@ -89,8 +89,8 @@ func TestMainVersionCommand(t *testing.T) {
 	}
 	defer r.Close()
 
-	os.Args = []string{"ratatosk", "version"}
-	os.Stdout = w
+	cliArgs = func() []string { return []string{"ratatosk", "version"} }
+	cliStdout = w
 
 	main()
 
