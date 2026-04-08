@@ -96,4 +96,4 @@ make clean
 
 ## License
 
-MIT
+Ratatosk is licensed under the GNU General Public License v3.0. See [LICENSE](./LICENSE) for the full text.
