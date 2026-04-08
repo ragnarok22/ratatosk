@@ -22,158 +22,46 @@
 
 Open-source, self-hosted reverse proxy and tunneling tool. A free alternative to ngrok. Expose local web servers, TCP services, and UDP endpoints to the internet securely, bypassing NAT and local firewalls.
 
-## Install the Server
+**[Documentation](https://ragnarok22.github.io/ratatosk/)**
 
-The relay server runs on a public VPS. It accepts CLI client connections and routes public HTTP, TCP, and UDP traffic to the correct tunnel.
+## Features
 
-### Docker (recommended)
+- **Self-hosted** -- run on your own VPS with no usage limits, no accounts, and no vendor lock-in.
+- **HTTP, TCP, and UDP tunnels** -- expose web apps, SSH, databases, game servers, and more.
+- **Single binary** -- the relay server ships with an embedded React dashboard; no separate frontend install.
+- **Multiplexed connections** -- one outbound TCP connection handles thousands of concurrent requests via [yamux](https://github.com/hashicorp/yamux).
+- **Basic Auth** -- protect HTTP tunnels with a username and password.
+- **Streamer mode** -- redact IPs, tokens, and file paths from output with `--streamer`.
+- **Self-update** -- the CLI can update itself with `ratatosk self-update`.
+
+## Quick Start
+
+### Install the CLI
+
+```sh
+# Homebrew (macOS / Linux)
+brew tap ragnarok22/tap
+brew install ratatosk
+
+# Or download a binary
+curl -Lo ratatosk https://github.com/ragnarok22/ratatosk/releases/latest/download/ratatosk-cli-$(uname -s | tr A-Z a-z)-$(uname -m | sed 's/x86_64/amd64/;s/aarch64/arm64/')
+chmod +x ratatosk && sudo mv ratatosk /usr/local/bin/
+```
+
+### Run the Server
 
 ```sh
 docker run -d --name ratatosk \
   -p 7000:7000 -p 8080:8080 -p 8081:8081 \
-  -p 10000-20000:10000-20000 \
   ghcr.io/ragnarok22/ratatosk-server
 ```
 
-> [!TIP]
-> The `10000-20000` range is for TCP/UDP tunnels. If you only use HTTP tunnels, you can omit it.
-
-To pass a config file:
-
-```sh
-docker run -d --name ratatosk \
-  -v /path/to/ratatosk.yaml:/etc/ratatosk/ratatosk.yaml:ro \
-  -p 7000:7000 -p 443:443 -p 8081:8081 \
-  ghcr.io/ragnarok22/ratatosk-server
-```
-
-### Build from Source
-
-```sh
-git clone https://github.com/ragnarok22/ratatosk.git
-cd ratatosk
-make build
-sudo cp bin/server /usr/local/bin/ratatosk-server
-```
-
-## Configure the Server
-
-The server runs out of the box with sane defaults — no config file required.
-
-| Port | Purpose |
-|------|---------|
-| `7000` | TCP control plane (CLI client connections) |
-| `8080` | Public HTTP(S) proxy |
-| `8081` | Admin dashboard and API |
-| `10000-20000` | Dynamic port range for TCP/UDP tunnels |
-
-### Config File
-
-The server searches for `ratatosk.yaml` in these locations (first match wins):
-
-1. `/etc/ratatosk/ratatosk.yaml`
-2. `$HOME/.ratatosk/ratatosk.yaml`
-3. `./ratatosk.yaml` (current directory)
-
-Copy the example as a starting point:
-
-```sh
-cp deploy/ratatosk.yaml.example /etc/ratatosk/ratatosk.yaml
-```
-
-```yaml
-base_domain: localhost       # Tunnels are <subdomain>.<base_domain>
-public_port: 8080            # Public HTTP(S) proxy port
-admin_port: 8081             # Admin dashboard port
-control_port: 7000           # TCP control plane port
-tls_enabled: false           # Enable TLS on the public proxy
-tls_cert_file: ""            # Path to TLS certificate (PEM)
-tls_key_file: ""             # Path to TLS private key (PEM)
-port_range_start: 10000      # Start of dynamic port range for TCP/UDP tunnels
-port_range_end: 20000        # End of dynamic port range (exclusive)
-```
-
-### Environment Variables
-
-Every option can be set via environment variables with the `RATATOSK_` prefix. Environment variables override config file values.
-
-| Variable | Default | Description |
-|---|---|---|
-| `RATATOSK_BASE_DOMAIN` | `localhost` | Base domain for tunnel subdomains |
-| `RATATOSK_PUBLIC_PORT` | `8080` | Public HTTP(S) proxy port |
-| `RATATOSK_ADMIN_PORT` | `8081` | Admin dashboard port |
-| `RATATOSK_CONTROL_PORT` | `7000` | TCP control plane port |
-| `RATATOSK_TLS_ENABLED` | `false` | Enable TLS on the public proxy |
-| `RATATOSK_TLS_CERT_FILE` | | Path to TLS certificate (PEM) |
-| `RATATOSK_TLS_KEY_FILE` | | Path to TLS private key (PEM) |
-| `RATATOSK_PORT_RANGE_START` | `10000` | Start of dynamic port range for TCP/UDP tunnels |
-| `RATATOSK_PORT_RANGE_END` | `20000` | End of dynamic port range (exclusive) |
-
-## Install the CLI
-
-The CLI client runs on your local machine. It opens a persistent, multiplexed connection to the relay server and forwards tunneled requests to a local port.
-
-### Homebrew (macOS / Linux)
-
-```sh
-brew tap ragnarok22/tap
-brew install ratatosk
-```
-
-### Download a Binary
-
-Grab the latest release for your platform from the [Releases](https://github.com/ragnarok22/ratatosk/releases) page, or use the commands below:
-
-```sh
-# macOS (Apple Silicon)
-curl -Lo ratatosk https://github.com/ragnarok22/ratatosk/releases/latest/download/ratatosk-cli-darwin-arm64
-chmod +x ratatosk && sudo mv ratatosk /usr/local/bin/
-
-# macOS (Intel)
-curl -Lo ratatosk https://github.com/ragnarok22/ratatosk/releases/latest/download/ratatosk-cli-darwin-amd64
-chmod +x ratatosk && sudo mv ratatosk /usr/local/bin/
-
-# Linux (amd64)
-curl -Lo ratatosk https://github.com/ragnarok22/ratatosk/releases/latest/download/ratatosk-cli-linux-amd64
-chmod +x ratatosk && sudo mv ratatosk /usr/local/bin/
-```
-
-On Windows, download `ratatosk-cli-windows-amd64.exe` from the Releases page.
-
-### Build from Source
-
-```sh
-git clone https://github.com/ragnarok22/ratatosk.git
-cd ratatosk
-make build
-sudo cp bin/cli /usr/local/bin/ratatosk
-```
-
-### Commands
-
-| Command | Description |
-|---------|-------------|
-| `ratatosk --port <port>` | Expose a local HTTP service (default: 3000) |
-| `ratatosk tcp <port>` | Expose a local TCP service (e.g., SSH, PostgreSQL) |
-| `ratatosk udp <port>` | Expose a local UDP service (e.g., game servers) |
-| `ratatosk --server host:port` | Connect to a specific relay server (default: `localhost:7000`) |
-| `ratatosk --basic-auth user:pass` | Require HTTP Basic Auth for tunnel visitors |
-| `ratatosk --streamer` | Enable streamer mode (redact sensitive data from output) |
-| `ratatosk version` | Print the CLI version |
-| `ratatosk self-update` | Check for updates and self-update (defers to `brew upgrade` if installed via Homebrew) |
-
-The `--server` flag can also be set via the `RATATOSK_SERVER` environment variable.
-
-### Usage
-
-Expose a local service running on port 3000:
+### Create a Tunnel
 
 ```sh
 ratatosk --port 3000
 ```
 
-The CLI connects to the relay server, establishes a [yamux](https://github.com/hashicorp/yamux) session, and prints the public tunnel URL:
-
 ```
 Ratatosk                        (Ctrl+C to quit)
 
@@ -181,224 +69,27 @@ Forwarding      http://quick-fox-1234.tunnel.example.com -> http://localhost:300
 Web Interface   http://127.0.0.1:4300
 ```
 
-The web interface provides a local traffic inspector for monitoring requests and responses flowing through the tunnel.
-
-### TCP Tunnels
-
-Expose local TCP services like SSH or databases:
+TCP and UDP tunnels are also supported:
 
 ```sh
-ratatosk tcp 22
+ratatosk tcp 22        # SSH
+ratatosk udp 25565     # Minecraft
 ```
 
-```
-Ratatosk                        (Ctrl+C to quit)
+See the [Getting Started](https://ragnarok22.github.io/ratatosk/guide/getting-started) guide for more.
 
-Forwarding      relay.example.com:15432 -> localhost:22 (tcp)
-```
+## Documentation
 
-The relay server allocates a public port from its dynamic range (default 10000-20000) and forwards raw TCP traffic to your local service. Common use cases:
+Full documentation is available at **[ragnarok22.github.io/ratatosk](https://ragnarok22.github.io/ratatosk/)**:
 
-```sh
-ratatosk tcp 22            # SSH
-ratatosk tcp 5432          # PostgreSQL
-ratatosk tcp 3306          # MySQL
-```
-
-### UDP Tunnels
-
-Expose local UDP services like game servers:
-
-```sh
-ratatosk udp 25565
-```
-
-```
-Ratatosk                        (Ctrl+C to quit)
-
-Forwarding      relay.example.com:18200 -> localhost:25565 (udp)
-```
-
-UDP datagrams are framed over the yamux TCP connection, preserving message boundaries. Each remote client gets its own multiplexed stream with automatic idle cleanup.
-
-### Basic Auth
-
-Protect your tunnel with HTTP Basic Authentication. Visitors must enter credentials before any traffic reaches your local service:
-
-```sh
-ratatosk --port 3000 --basic-auth "admin:secret"
-```
-
-```
-Ratatosk                        (Ctrl+C to quit)
-
-Forwarding      http://quick-fox-1234.tunnel.example.com -> http://localhost:3000
-Basic Auth      enabled (user: admin)
-Web Interface   http://127.0.0.1:4300
-```
-
-Unauthenticated visitors receive a `401 Unauthorized` response with a `WWW-Authenticate` header, which triggers the browser's native login dialog. The relay server enforces the check before any bytes are forwarded to the tunnel.
-
-### Streamer Mode
-
-If you are recording, streaming, or taking screenshots, use `--streamer` to prevent leaking sensitive data such as IP addresses, auth tokens, and file paths:
-
-```sh
-ratatosk --port 3000 --streamer
-```
-
-```
-Ratatosk                        (Ctrl+C to quit)
-
-Forwarding      http://quick-fox-1234.tunnel.example.com -> http://localhost:[REDACTED]
-Web Interface   http://[REDACTED]
-```
-
-Streamer mode redacts:
-- IPv4 and IPv6 addresses (including ports)
-- `localhost:<port>` in log output
-- Bearer tokens and sensitive HTTP headers (`Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, etc.)
-- Local file paths (`/Users/...`, `/home/...`)
-- Request/response headers and bodies in the traffic inspector
-
-## Production Deployment
-
-### DNS Setup
-
-Point a wildcard DNS record to your VPS:
-
-```
-*.tunnel.example.com  A  <your-vps-ip>
-```
-
-### TLS with Let's Encrypt
-
-Obtain a wildcard certificate using a DNS-01 challenge (e.g. with [certbot](https://certbot.eff.org/)):
-
-```sh
-certbot certonly --manual --preferred-challenges dns \
-  -d "*.tunnel.example.com" -d "tunnel.example.com"
-```
-
-Then configure the server:
-
-```yaml
-base_domain: tunnel.example.com
-public_port: 443
-tls_enabled: true
-tls_cert_file: /etc/letsencrypt/live/tunnel.example.com/fullchain.pem
-tls_key_file: /etc/letsencrypt/live/tunnel.example.com/privkey.pem
-```
-
-When TLS is enabled, the server also starts an HTTP listener on port 80 that redirects all traffic to HTTPS.
-
-### Systemd
-
-Install the relay server as a system service:
-
-```sh
-sudo useradd --system --no-create-home --shell /usr/sbin/nologin ratatosk
-
-sudo cp bin/server /usr/local/bin/ratatosk-server
-sudo mkdir -p /etc/ratatosk /var/log/ratatosk
-sudo cp deploy/ratatosk.yaml.example /etc/ratatosk/ratatosk.yaml
-sudo chown -R ratatosk:ratatosk /etc/ratatosk /var/log/ratatosk
-
-sudo editor /etc/ratatosk/ratatosk.yaml
-
-sudo cp deploy/ratatosk.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable --now ratatosk
-```
-
-Check status:
-
-```sh
-sudo systemctl status ratatosk
-sudo journalctl -u ratatosk -f
-```
-
-The systemd unit uses `AmbientCapabilities=CAP_NET_BIND_SERVICE` so the server can bind to ports 80 and 443 without running as root.
-
-## Homelab & Docker
-
-### Docker Compose
-
-Ready-to-use Docker Compose templates are provided in [`deploy/compose/`](deploy/compose/) for quick deployment:
-
-- **`server.docker-compose.yml`** -- Deploy the relay server on a VPS
-- **`client.docker-compose.yml`** -- Run the CLI client in your homelab
-- **`full-stack.docker-compose.yml`** -- Combined server + client for testing
-
-```sh
-cd deploy/compose
-cp .env.example .env   # Edit with your settings
-docker compose -f server.docker-compose.yml up -d
-```
-
-The templates include CasaOS and Portainer-compatible metadata.
-
-### Home Assistant Add-on
-
-Ratatosk can be installed as a Home Assistant Add-on to securely expose your smart home dashboard without port forwarding.
-
-1. In Home Assistant, go to **Settings > Add-ons > Add-on Store**
-2. Click the menu (top right) and select **Repositories**
-3. Add the repository URL: `https://github.com/ragnarok22/ratatosk`
-4. Find "Ratatosk Tunnel" in the store and install it
-5. Configure the `server` option with your relay server address
-
-See [`home-assistant/ratatosk/DOCS.md`](home-assistant/ratatosk/DOCS.md) for full configuration details.
-
-## Development
-
-### Prerequisites
-
-- [Go](https://go.dev/) 1.26+
-- [Node.js](https://nodejs.org/) 20+ and [pnpm](https://pnpm.io/) (for the dashboard)
-
-### Quick Start
-
-```sh
-make dev-server      # Start the relay server (builds dashboard first)
-make dev-cli         # Connect the CLI client (separate terminal)
-make dev-dashboard   # Vite dev server with hot-reload (separate terminal)
-```
-
-### Testing
-
-```sh
-make test          # run all tests
-make test-race     # run with the race detector
-make coverage      # generate and display coverage report
-```
-
-### Project Structure
-
-```
-ratatosk/
-├── cmd/
-│   ├── server/            # Relay server entry point
-│   │   └── dashboard/     # React + Vite frontend
-│   └── cli/               # CLI client entry point
-├── internal/
-│   ├── config/            # Configuration manager (viper)
-│   ├── inspector/         # Traffic monitoring and logging
-│   ├── redact/            # Streamer mode sensitive data redaction
-│   ├── tunnel/            # TCP multiplexing (yamux), TCP/UDP proxy, port allocation
-│   └── protocol/          # Message formats for server-client communication
-├── deploy/                # Systemd, Docker, and example config
-├── Makefile
-├── go.mod
-└── go.sum
-```
-
-## How It Works
-
-1. The CLI client dials the Relay Server over TCP and wraps the connection in a [yamux](https://github.com/hashicorp/yamux) multiplexed session.
-2. Multiple logical streams run over this single TCP connection -- no extra ports needed on the local router.
-3. For **HTTP tunnels**, the Relay Server routes public traffic by subdomain through yamux streams back to the client.
-4. For **TCP/UDP tunnels**, the Relay Server allocates a public port, accepts connections on it, and relays traffic through yamux streams. UDP datagrams are length-prefixed to preserve message boundaries.
+- [Introduction](https://ragnarok22.github.io/ratatosk/guide/introduction) -- what Ratatosk is and how it works
+- [Installation](https://ragnarok22.github.io/ratatosk/guide/installation) -- all install methods (Homebrew, binary, source)
+- [Getting Started](https://ragnarok22.github.io/ratatosk/guide/getting-started) -- create your first tunnel
+- [Deployment](https://ragnarok22.github.io/ratatosk/guide/deployment) -- DNS, TLS, systemd, and Docker on a VPS
+- [Homelab & Smart Home](https://ragnarok22.github.io/ratatosk/guide/homelab) -- Docker Compose, Home Assistant add-on
+- [CLI Commands](https://ragnarok22.github.io/ratatosk/reference/cli-commands) -- flags, subcommands, and examples
+- [Configuration](https://ragnarok22.github.io/ratatosk/reference/configuration) -- YAML config and environment variables
+- [Architecture](https://ragnarok22.github.io/ratatosk/reference/architecture) -- request flow and design decisions
 
 ## Community
 

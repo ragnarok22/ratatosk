@@ -163,7 +163,7 @@ sudo journalctl -u ratatosk -f
 With the server running on your VPS, connect from your local machine:
 
 ```sh
-ratatosk 3000
+ratatosk --port 3000
 ```
 
 You should get a tunnel URL like `https://quick-fox-1234.tunnel.yourdomain.com` pointing to your `localhost:3000`.
