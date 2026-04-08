@@ -1,4 +1,4 @@
-.PHONY: dev-server dev-cli dev-dashboard build build-dashboard clean format lint test test-race coverage
+.PHONY: dev-server dev-cli dev-dashboard build build-dashboard clean format lint test test-race coverage docs-dev docs-build docs-preview
 
 dev-server: build-dashboard
 	go run ./cmd/server
@@ -34,3 +34,12 @@ coverage:
 
 clean:
 	rm -rf bin/ coverage.out cmd/server/dashboard/dist
+
+docs-dev:
+	cd docs && pnpm run docs:dev
+
+docs-build:
+	cd docs && pnpm install && pnpm run docs:build
+
+docs-preview:
+	cd docs && pnpm run docs:preview
