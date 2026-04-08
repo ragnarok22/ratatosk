@@ -47,7 +47,7 @@ func (l *acceptErrorListener) Close() error {
 }
 
 func (l *acceptErrorListener) Addr() net.Addr {
-	return stubAddr("127.0.0.1:0")
+	return &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0}
 }
 
 func TestProxyTCPConnBidirectional(t *testing.T) {

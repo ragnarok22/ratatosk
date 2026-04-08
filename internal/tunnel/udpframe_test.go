@@ -3,9 +3,16 @@ package tunnel
 import (
 	"bytes"
 	"encoding/binary"
+	"errors"
 	"io"
 	"testing"
 )
+
+type failingWriter struct{}
+
+func (failingWriter) Write([]byte) (int, error) {
+	return 0, errors.New("write failed")
+}
 
 func TestFrameRoundTrip(t *testing.T) {
 	payload := []byte("hello UDP")
@@ -104,5 +111,12 @@ func TestFrameMultipleRoundTrips(t *testing.T) {
 	_, err := ReadFrame(&buf)
 	if err != io.EOF {
 		t.Errorf("expected EOF, got %v", err)
+	}
+}
+
+func TestWriteFrameHeaderWriteError(t *testing.T) {
+	err := WriteFrame(failingWriter{}, []byte("payload"))
+	if err == nil {
+		t.Fatal("expected write error")
 	}
 }
