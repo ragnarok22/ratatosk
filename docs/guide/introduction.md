@@ -9,6 +9,7 @@ If you've ever needed to share a local development server with a colleague, demo
 - **No usage limits** -- tunnel as much traffic as your VPS can handle.
 - **No account required** -- install and run immediately.
 - **Full control** -- you own the server, the domain, and the data flowing through it.
+- **Streamer mode** -- redact IPs, tokens, and file paths from output with `--streamer`, so you can safely record or stream without leaking sensitive data.
 
 ## How It Works
 

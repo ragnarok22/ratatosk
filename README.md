@@ -145,6 +145,7 @@ sudo cp bin/cli /usr/local/bin/ratatosk
 | Command | Description |
 |---------|-------------|
 | `ratatosk --port <port>` | Expose a local service (default: 3000) |
+| `ratatosk --streamer` | Enable streamer mode (redact sensitive data from output) |
 | `ratatosk version` | Print the CLI version |
 | `ratatosk self-update` | Check for updates and self-update (defers to `brew upgrade` if installed via Homebrew) |
 
@@ -166,6 +167,28 @@ Web Interface   http://127.0.0.1:4300
 ```
 
 The web interface provides a local traffic inspector for monitoring requests and responses flowing through the tunnel.
+
+### Streamer Mode
+
+If you are recording, streaming, or taking screenshots, use `--streamer` to prevent leaking sensitive data such as IP addresses, auth tokens, and file paths:
+
+```sh
+ratatosk --port 3000 --streamer
+```
+
+```
+Ratatosk                        (Ctrl+C to quit)
+
+Forwarding      http://quick-fox-1234.tunnel.example.com -> http://localhost:[REDACTED]
+Web Interface   http://[REDACTED]
+```
+
+Streamer mode redacts:
+- IPv4 and IPv6 addresses (including ports)
+- `localhost:<port>` in log output
+- Bearer tokens and sensitive HTTP headers (`Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, etc.)
+- Local file paths (`/Users/...`, `/home/...`)
+- Request/response headers and bodies in the traffic inspector
 
 ## Production Deployment
 
@@ -260,6 +283,7 @@ ratatosk/
 ├── internal/
 │   ├── config/            # Configuration manager (viper)
 │   ├── inspector/         # Traffic monitoring and logging
+│   ├── redact/            # Streamer mode sensitive data redaction
 │   ├── tunnel/            # TCP multiplexing (yamux)
 │   └── protocol/          # Message formats for server-client communication
 ├── deploy/                # Systemd, Docker, and example config

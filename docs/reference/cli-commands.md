@@ -13,6 +13,7 @@ ratatosk [command] [flags]
 | Command | Description |
 |---------|-------------|
 | `ratatosk --port <port>` | Expose a local service (default: 3000) |
+| `ratatosk --streamer` | Enable streamer mode (redact sensitive data from output) |
 | `ratatosk version` | Print the CLI version |
 | `ratatosk self-update` | Check for updates and self-update |
 
@@ -27,6 +28,34 @@ The local port to expose through the tunnel.
 
 ```sh
 ratatosk --port 8080
+```
+
+### `--streamer`
+
+Enable streamer mode. When active, sensitive data is replaced with `[REDACTED]` in all CLI output and the traffic inspector.
+
+- **Type:** boolean
+- **Default:** `false`
+
+```sh
+ratatosk --port 3000 --streamer
+```
+
+This is useful when recording videos, streaming on Twitch, or taking screenshots for blog posts. It prevents accidental leaks of:
+
+- **IP addresses** -- IPv4 (e.g. `192.168.1.5:3000`) and IPv6 (e.g. `[::1]:8080`)
+- **localhost ports** -- `localhost:3000` becomes `localhost:[REDACTED]`
+- **Auth tokens** -- Bearer tokens in log output
+- **Sensitive HTTP headers** -- `Authorization`, `Cookie`, `Set-Cookie`, `X-Api-Key`, `X-Auth-Token`, `X-Forwarded-For`, `X-Real-Ip`, and `Proxy-Authorization` values are replaced in the traffic inspector
+- **File paths** -- absolute paths starting with `/Users/`, `/home/`, or `/root/`
+
+Example output with streamer mode enabled:
+
+```
+Ratatosk                        (Ctrl+C to quit)
+
+Forwarding      http://quick-fox-1234.tunnel.example.com -> http://localhost:[REDACTED]
+Web Interface   http://[REDACTED]
 ```
 
 ## Self-Update

@@ -46,6 +46,16 @@ If you omit the `--port` flag, Ratatosk defaults to port 3000:
 ratatosk
 ```
 
+## Streamer Mode
+
+If you are streaming, recording, or taking screenshots, add `--streamer` to redact sensitive data (IPs, tokens, file paths) from the terminal output and the traffic inspector:
+
+```sh
+ratatosk --port 3000 --streamer
+```
+
+See [CLI Commands > --streamer](/reference/cli-commands#streamer) for the full list of redacted patterns.
+
 ## Local Development
 
 To run both the server and client locally for development:
