@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +29,67 @@ func (failingReadCloser) Read([]byte) (int, error) {
 
 func (failingReadCloser) Close() error {
 	return nil
+}
+
+type stubAddr string
+
+func (a stubAddr) Network() string {
+	return "tcp"
+}
+
+func (a stubAddr) String() string {
+	return string(a)
+}
+
+type stubListener struct {
+	closed chan struct{}
+}
+
+func newStubListener() *stubListener {
+	return &stubListener{closed: make(chan struct{})}
+}
+
+func (l *stubListener) Accept() (net.Conn, error) {
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *stubListener) Close() error {
+	select {
+	case <-l.closed:
+	default:
+		close(l.closed)
+	}
+	return nil
+}
+
+func (l *stubListener) Addr() net.Addr {
+	return stubAddr("127.0.0.1:0")
+}
+
+func newLoopbackServer(t *testing.T, handler http.Handler) *httptest.Server {
+	t.Helper()
+
+	ln, err := net.Listen("tcp4", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	server := httptest.NewUnstartedServer(handler)
+	server.Listener = ln
+	server.Start()
+	t.Cleanup(server.Close)
+	return server
+}
+
+type brokenFS struct{}
+
+func (brokenFS) Open(string) (fs.File, error) {
+	return nil, fs.ErrNotExist
+}
+
+func (brokenFS) Sub(string) (fs.FS, error) {
+	return nil, fs.ErrNotExist
 }
 
 func TestLoadServerConfig(t *testing.T) {
@@ -95,14 +157,11 @@ func TestStartControlPlane(t *testing.T) {
 
 	stop := make(chan struct{})
 	listenCalled := make(chan struct{})
+	listener := newStubListener()
 
 	err := startControlPlane(stop, func(network, address string) (net.Listener, error) {
-		ln, err := net.Listen(network, address)
-		if err != nil {
-			return nil, err
-		}
 		close(listenCalled)
-		return ln, nil
+		return listener, nil
 	})
 	if err != nil {
 		t.Fatalf("startControlPlane: %v", err)
@@ -522,7 +581,7 @@ func startProxyServer(t *testing.T) string {
 
 func TestHTTPProxySingleRequest(t *testing.T) {
 	const want = "<html><body>Hello from local</body></html>"
-	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, want)
 	}))
@@ -559,7 +618,7 @@ func TestHTTPProxySingleRequest(t *testing.T) {
 // after the first request, the hijacked connection is stuck in io.Copy
 // and the browser's second request (for JS/CSS) hangs until timeout.
 func TestHTTPProxySequentialRequests(t *testing.T) {
-	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprintf(w, "path=%s", r.URL.Path)
 	}))
@@ -603,7 +662,7 @@ func TestHTTPProxySequentialRequests(t *testing.T) {
 // TestHTTPProxyConcurrentRequests simulates a browser loading a page that
 // triggers multiple parallel resource fetches (like Swagger UI loading JS/CSS).
 func TestHTTPProxyConcurrentRequests(t *testing.T) {
-	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprintf(w, "ok:%s", r.URL.Path)
 	}))
@@ -661,7 +720,7 @@ func TestHTTPProxyConcurrentRequests(t *testing.T) {
 // connection is still alive and queues subsequent requests on it — which
 // get lost when they're written to the closed stream.
 func TestHTTPProxyKeepAlive(t *testing.T) {
-	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprintf(w, "resp:%s", r.URL.Path)
 	}))
@@ -742,7 +801,7 @@ func TestAdminDashboardFallback(t *testing.T) {
 }
 
 func TestAdminDashboardSubErrorFallback(t *testing.T) {
-	handler := newAdminHandlerFS(registry, fstest.MapFS{})
+	handler := newAdminHandlerFS(registry, brokenFS{})
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -1080,7 +1139,7 @@ func TestHTTPProxyClientNoResponse(t *testing.T) {
 }
 
 func TestHTTPProxyKeepAliveTunnelGone(t *testing.T) {
-	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprint(w, "ok")
 	}))
@@ -1122,7 +1181,7 @@ func TestHTTPProxyKeepAliveTunnelGone(t *testing.T) {
 }
 
 func TestHTTPProxyPOSTRequest(t *testing.T) {
-	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprintf(w, "got:%s", body)
@@ -1155,7 +1214,7 @@ func TestHTTPProxyPOSTRequest(t *testing.T) {
 }
 
 func TestHTTPProxyKeepAliveInvalidHost(t *testing.T) {
-	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "ok")
 	}))
 	defer local.Close()
@@ -1302,7 +1361,7 @@ func TestWriteRaw401(t *testing.T) {
 }
 
 func TestHTTPProxyKeepAliveBasicAuthRejected(t *testing.T) {
-	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "ok")
 	}))
 	defer local.Close()
@@ -1348,7 +1407,7 @@ func TestHTTPProxyKeepAliveBasicAuthRejected(t *testing.T) {
 
 func TestHTTPProxyBasicAuthRejected(t *testing.T) {
 	// Register a tunnel with basic auth required.
-	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "should not reach")
 	}))
 	defer local.Close()
@@ -1371,7 +1430,7 @@ func TestHTTPProxyBasicAuthRejected(t *testing.T) {
 }
 
 func TestHTTPProxyBasicAuthAccepted(t *testing.T) {
-	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		fmt.Fprint(w, "authenticated")
 	}))
@@ -1405,7 +1464,7 @@ func TestHTTPProxyBasicAuthAccepted(t *testing.T) {
 }
 
 func TestHTTPProxyBasicAuthWrongCredentials(t *testing.T) {
-	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "should not reach")
 	}))
 	defer local.Close()
@@ -1426,7 +1485,7 @@ func TestHTTPProxyBasicAuthWrongCredentials(t *testing.T) {
 
 func TestHTTPProxyNoAuthPublicTunnel(t *testing.T) {
 	// Tunnel without auth — should work without credentials.
-	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "public")
 	}))
 	defer local.Close()
