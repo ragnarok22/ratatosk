@@ -2,6 +2,7 @@ package inspector
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -73,6 +74,33 @@ func TestStartServerPortFallback(t *testing.T) {
 	// Should have fallen back to a different port.
 	if strings.Contains(addr, "4040") {
 		t.Fatalf("expected fallback port, got %s", addr)
+	}
+}
+
+func TestStartServerAllPortsBusy(t *testing.T) {
+	var listeners []net.Listener
+	for _, port := range fallbackPorts {
+		ln, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			// Port already in use, we can't fully control the test.
+			for _, l := range listeners {
+				l.Close()
+			}
+			t.Skipf("could not bind port %d: %v", port, err)
+			return
+		}
+		listeners = append(listeners, ln)
+	}
+	t.Cleanup(func() {
+		for _, ln := range listeners {
+			ln.Close()
+		}
+	})
+
+	logger := NewLogger()
+	_, err := StartServer(logger)
+	if err == nil {
+		t.Fatal("expected error when all ports are busy")
 	}
 }
 

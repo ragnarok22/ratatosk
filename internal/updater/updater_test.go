@@ -262,6 +262,34 @@ func TestUpdateCLINewerVersionDownloadError(t *testing.T) {
 	}
 }
 
+func TestUpdateCLIDownloadNetworkError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(githubRelease{TagName: "v99.0.0"})
+	}))
+	defer srv.Close()
+
+	orig := http.DefaultTransport
+	http.DefaultTransport = transportFunc(func(req *http.Request) (*http.Response, error) {
+		if strings.Contains(req.URL.Path, "releases/download") {
+			return nil, fmt.Errorf("simulated download error")
+		}
+		req2 := req.Clone(req.Context())
+		req2.URL.Scheme = "http"
+		req2.URL.Host = strings.TrimPrefix(srv.URL, "http://")
+		return orig.RoundTrip(req2)
+	})
+	defer func() { http.DefaultTransport = orig }()
+
+	err := UpdateCLI("v1.0.0")
+	if err == nil {
+		t.Fatal("expected error for download network failure")
+	}
+	if !strings.Contains(err.Error(), "failed to download update") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
 func TestFetchLatestVersionFromURLTransportError(t *testing.T) {
 	client := &http.Client{
 		Transport: transportFunc(func(req *http.Request) (*http.Response, error) {

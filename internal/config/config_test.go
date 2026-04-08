@@ -109,6 +109,22 @@ tls_key_file: /etc/ssl/key.pem
 	}
 }
 
+func TestLoadConfigInvalidFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "ratatosk.yaml"), []byte("{{invalid yaml"), 0644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	orig, _ := os.Getwd()
+	os.Chdir(dir)
+	t.Cleanup(func() { os.Chdir(orig) })
+
+	_, err := LoadConfig()
+	if err == nil {
+		t.Fatal("expected error for invalid YAML file")
+	}
+}
+
 func TestTunnelURL(t *testing.T) {
 	tests := []struct {
 		name      string
