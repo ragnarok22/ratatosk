@@ -26,6 +26,7 @@ export default defineConfig({
             { text: 'Installation', link: '/guide/installation' },
             { text: 'Getting Started', link: '/guide/getting-started' },
             { text: 'Deployment', link: '/guide/deployment' },
+            { text: 'Homelab & Smart Home', link: '/guide/homelab' },
           ],
         },
       ],
