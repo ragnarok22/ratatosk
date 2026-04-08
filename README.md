@@ -1,5 +1,8 @@
 # Ratatosk
 
+> [!WARNING]
+> Ratatosk is currently in alpha. Expect rough edges and frequent breaking changes while the core architecture, APIs, and workflows are still being stabilized.
+
 Open-source, self-hosted reverse proxy and tunneling tool. A free alternative to ngrok.
 
 Expose local web servers to the internet securely, bypassing NAT and local firewalls.
