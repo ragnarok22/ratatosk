@@ -257,6 +257,51 @@ func TestRunExplicitServerBeatsEnvOverride(t *testing.T) {
 	}
 }
 
+func TestRunTCPCommandAcceptsServerFlagAfterPort(t *testing.T) {
+	oldLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	var gotServer string
+	var gotPort int
+	var gotProto string
+
+	code := run(
+		[]string{"ratatosk", "tcp", "8080", "--server", "manual.example:1234"},
+		func(string) string { return "" },
+		&stdout,
+		&stderr,
+		func(string) error {
+			t.Fatal("updateCLI should not be called")
+			return nil
+		},
+		func(string, int, string) error {
+			t.Fatal("runClient should not be called")
+			return nil
+		},
+		func(server string, port int, proto string) error {
+			gotServer = server
+			gotPort = port
+			gotProto = proto
+			return nil
+		},
+	)
+
+	if code != 0 {
+		t.Fatalf("code = %d, want 0 (stderr=%q)", code, stderr.String())
+	}
+	if gotServer != "manual.example:1234" {
+		t.Fatalf("server = %q, want %q", gotServer, "manual.example:1234")
+	}
+	if gotPort != 8080 {
+		t.Fatalf("port = %d, want 8080", gotPort)
+	}
+	if gotProto != protocol.ProtoTCP {
+		t.Fatalf("proto = %q, want %q", gotProto, protocol.ProtoTCP)
+	}
+}
+
 func TestRunRejectsInvalidBasicAuth(t *testing.T) {
 	oldLogger := slog.Default()
 	oldRedact := redact.Enabled
