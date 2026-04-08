@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/base64"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -14,13 +15,14 @@ import (
 	"ratatosk/internal/redact"
 )
 
-// HandleStream intercepts HTTP traffic on a yamux stream, logs it, and
-// forwards it to the local server at localAddr.
-func HandleStream(stream net.Conn, localAddr string, logger *Logger) {
+// parseAndPrepareRequest reads an HTTP request from the stream, drains
+// its body, and rewrites the URL so it can be forwarded via
+// http.DefaultTransport. It returns the parsed request and the raw
+// request body bytes.
+func parseAndPrepareRequest(stream net.Conn, localAddr string) (*http.Request, []byte, error) {
 	req, err := http.ReadRequest(bufio.NewReader(stream))
 	if err != nil {
-		slog.Error("failed to parse HTTP request from stream", "error", err)
-		return
+		return nil, nil, fmt.Errorf("failed to parse HTTP request from stream: %w", err)
 	}
 
 	var reqBody []byte
@@ -28,8 +30,7 @@ func HandleStream(stream net.Conn, localAddr string, logger *Logger) {
 		reqBody, err = io.ReadAll(req.Body)
 		req.Body.Close()
 		if err != nil {
-			slog.Error("failed to read request body", "error", err)
-			return
+			return nil, nil, fmt.Errorf("failed to read request body: %w", err)
 		}
 	}
 
@@ -45,6 +46,44 @@ func HandleStream(stream net.Conn, localAddr string, logger *Logger) {
 	// Remove Accept-Encoding so the local server responds uncompressed.
 	// This ensures logged bodies are human-readable.
 	req.Header.Del("Accept-Encoding")
+
+	return req, reqBody, nil
+}
+
+// buildTrafficLog creates a TrafficLog entry from request/response data.
+func buildTrafficLog(req *http.Request, reqBody []byte, resp *http.Response, respBody []byte, start time.Time, duration time.Duration) TrafficLog {
+	ct := resp.Header.Get("Content-Type")
+	binary := isBinaryContentType(ct)
+
+	var loggedRespBody string
+	if binary {
+		loggedRespBody = base64.StdEncoding.EncodeToString(respBody)
+	} else {
+		loggedRespBody = TruncateBody(respBody)
+	}
+
+	return TrafficLog{
+		Method:         req.Method,
+		Path:           req.URL.Path,
+		ReqHeaders:     flattenHeaders(req.Header),
+		ReqBody:        TruncateBody(reqBody),
+		RespStatus:     resp.StatusCode,
+		RespHeaders:    flattenHeaders(resp.Header),
+		RespBody:       loggedRespBody,
+		RespBodyBinary: binary,
+		Duration:       duration,
+		Timestamp:      start,
+	}
+}
+
+// HandleStream intercepts HTTP traffic on a yamux stream, logs it, and
+// forwards it to the local server at localAddr.
+func HandleStream(stream net.Conn, localAddr string, logger *Logger) {
+	req, reqBody, err := parseAndPrepareRequest(stream, localAddr)
+	if err != nil {
+		slog.Error(err.Error())
+		return
+	}
 
 	start := time.Now()
 
@@ -67,28 +106,7 @@ func HandleStream(stream net.Conn, localAddr string, logger *Logger) {
 
 	duration := time.Since(start)
 
-	ct := resp.Header.Get("Content-Type")
-	binary := isBinaryContentType(ct)
-
-	var loggedRespBody string
-	if binary {
-		loggedRespBody = base64.StdEncoding.EncodeToString(respBody)
-	} else {
-		loggedRespBody = TruncateBody(respBody)
-	}
-
-	logger.Add(TrafficLog{
-		Method:         req.Method,
-		Path:           req.URL.Path,
-		ReqHeaders:     flattenHeaders(req.Header),
-		ReqBody:        TruncateBody(reqBody),
-		RespStatus:     resp.StatusCode,
-		RespHeaders:    flattenHeaders(resp.Header),
-		RespBody:       loggedRespBody,
-		RespBodyBinary: binary,
-		Duration:       duration,
-		Timestamp:      start,
-	})
+	logger.Add(buildTrafficLog(req, reqBody, resp, respBody, start, duration))
 
 	slog.Info("request completed",
 		"method", req.Method,
