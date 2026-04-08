@@ -1463,6 +1463,266 @@ func TestHTTPProxyBasicAuthAccepted(t *testing.T) {
 	}
 }
 
+func TestHandleConnectionTCPTunnel(t *testing.T) {
+	oldAlloc := portAlloc
+	portAlloc = tunnel.NewPortAllocator(33000, 33100)
+	t.Cleanup(func() { portAlloc = oldAlloc })
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		clientConn.Close()
+		serverConn.Close()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleConnection(serverConn)
+	}()
+
+	clientSession, err := tunnel.NewClientSession(clientConn)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+
+	controlStream, err := clientSession.Open()
+	if err != nil {
+		t.Fatalf("Open control stream: %v", err)
+	}
+
+	req := &protocol.TunnelRequest{Protocol: protocol.ProtoTCP, LocalPort: 22}
+	if err := protocol.WriteRequest(controlStream, req); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+
+	resp, err := protocol.ReadResponse(controlStream)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	controlStream.Close()
+
+	if !resp.Success {
+		t.Fatalf("handshake failed: %s", resp.Error)
+	}
+	if resp.Port == 0 {
+		t.Fatal("expected non-zero port in response")
+	}
+	if resp.Subdomain != "" {
+		t.Errorf("expected empty subdomain for TCP tunnel, got %q", resp.Subdomain)
+	}
+
+	// Verify registered in port registry.
+	if _, ok := registry.GetPortEntry(resp.Port); !ok {
+		t.Fatalf("port %d not found in registry", resp.Port)
+	}
+
+	// Client side: accept streams and echo data back.
+	go func() {
+		for {
+			stream, err := clientSession.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer stream.Close()
+				io.Copy(stream, stream)
+			}()
+		}
+	}()
+
+	// Connect to the allocated port and verify data flows.
+	tcpConn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", resp.Port), 2*time.Second)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer tcpConn.Close()
+
+	msg := []byte("hello TCP tunnel")
+	if _, err := tcpConn.Write(msg); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	buf := make([]byte, len(msg))
+	tcpConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := io.ReadFull(tcpConn, buf); err != nil {
+		t.Fatalf("ReadFull: %v", err)
+	}
+	if string(buf) != string(msg) {
+		t.Errorf("got %q, want %q", buf, msg)
+	}
+
+	// Close client session and verify cleanup.
+	tcpConn.Close()
+	clientSession.Close()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleConnection did not return after client disconnect")
+	}
+
+	if _, ok := registry.GetPortEntry(resp.Port); ok {
+		t.Fatalf("port %d still in registry after disconnect", resp.Port)
+	}
+}
+
+func TestHandleConnectionUDPTunnel(t *testing.T) {
+	oldAlloc := portAlloc
+	portAlloc = tunnel.NewPortAllocator(34000, 34100)
+	t.Cleanup(func() { portAlloc = oldAlloc })
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		clientConn.Close()
+		serverConn.Close()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleConnection(serverConn)
+	}()
+
+	clientSession, err := tunnel.NewClientSession(clientConn)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+
+	controlStream, err := clientSession.Open()
+	if err != nil {
+		t.Fatalf("Open control stream: %v", err)
+	}
+
+	req := &protocol.TunnelRequest{Protocol: protocol.ProtoUDP, LocalPort: 25565}
+	if err := protocol.WriteRequest(controlStream, req); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+
+	resp, err := protocol.ReadResponse(controlStream)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	controlStream.Close()
+
+	if !resp.Success {
+		t.Fatalf("handshake failed: %s", resp.Error)
+	}
+	if resp.Port == 0 {
+		t.Fatal("expected non-zero port in response")
+	}
+
+	// Verify registered in port registry.
+	if _, ok := registry.GetPortEntry(resp.Port); !ok {
+		t.Fatalf("port %d not found in registry", resp.Port)
+	}
+
+	// Client side: accept streams, read framed data, and echo back.
+	go func() {
+		for {
+			stream, err := clientSession.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer stream.Close()
+				for {
+					data, err := tunnel.ReadFrame(stream)
+					if err != nil {
+						return
+					}
+					tunnel.WriteFrame(stream, data)
+				}
+			}()
+		}
+	}()
+
+	// Send a UDP datagram to the allocated port.
+	udpAddr, _ := net.ResolveUDPAddr("udp", fmt.Sprintf("127.0.0.1:%d", resp.Port))
+	udpConn, err := net.DialUDP("udp", nil, udpAddr)
+	if err != nil {
+		t.Fatalf("DialUDP: %v", err)
+	}
+	defer udpConn.Close()
+
+	msg := []byte("hello UDP tunnel")
+	if _, err := udpConn.Write(msg); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+
+	buf := make([]byte, 65535)
+	udpConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	n, err := udpConn.Read(buf)
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if string(buf[:n]) != string(msg) {
+		t.Errorf("got %q, want %q", buf[:n], msg)
+	}
+
+	// Close client session and verify cleanup.
+	clientSession.Close()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleConnection did not return after client disconnect")
+	}
+
+	if _, ok := registry.GetPortEntry(resp.Port); ok {
+		t.Fatalf("port %d still in registry after disconnect", resp.Port)
+	}
+}
+
+func TestHandleConnectionUnsupportedProtocol(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		clientConn.Close()
+		serverConn.Close()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleConnection(serverConn)
+	}()
+
+	clientSession, err := tunnel.NewClientSession(clientConn)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+
+	controlStream, err := clientSession.Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+
+	req := &protocol.TunnelRequest{Protocol: "ftp", LocalPort: 21}
+	if err := protocol.WriteRequest(controlStream, req); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+
+	resp, err := protocol.ReadResponse(controlStream)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	controlStream.Close()
+
+	if resp.Success {
+		t.Fatal("expected failure for unsupported protocol")
+	}
+	if !strings.Contains(resp.Error, "unsupported protocol") {
+		t.Errorf("error = %q, want to contain 'unsupported protocol'", resp.Error)
+	}
+
+	clientSession.Close()
+
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("handleConnection did not return")
+	}
+}
+
 func TestHTTPProxyBasicAuthWrongCredentials(t *testing.T) {
 	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprint(w, "should not reach")

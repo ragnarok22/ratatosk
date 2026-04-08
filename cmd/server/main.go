@@ -2,13 +2,16 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/tls"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/hashicorp/yamux"
 
@@ -18,8 +21,9 @@ import (
 )
 
 var (
-	registry = tunnel.NewRegistry()
-	cfg      *config.ServerConfig
+	registry  = tunnel.NewRegistry()
+	cfg       *config.ServerConfig
+	portAlloc *tunnel.PortAllocator
 )
 
 func main() {
@@ -29,6 +33,8 @@ func main() {
 		slog.Error("failed to load config", "error", err)
 		os.Exit(1)
 	}
+
+	portAlloc = tunnel.NewPortAllocator(cfg.PortRangeStart, cfg.PortRangeEnd)
 
 	stop := make(chan struct{})
 
@@ -208,6 +214,21 @@ func handleConnection(conn net.Conn) {
 	}
 	slog.Info("received tunnel request", "remote", remote, "protocol", req.Protocol, "local_port", req.LocalPort)
 
+	switch req.Protocol {
+	case protocol.ProtoHTTP:
+		handleHTTPTunnel(session, controlStream, req, remote)
+	case protocol.ProtoTCP:
+		handleTCPTunnel(session, controlStream, req, remote)
+	case protocol.ProtoUDP:
+		handleUDPTunnel(session, controlStream, req, remote)
+	default:
+		resp := &protocol.TunnelResponse{Success: false, Error: fmt.Sprintf("unsupported protocol: %s", req.Protocol)}
+		protocol.WriteResponse(controlStream, resp)
+		controlStream.Close()
+	}
+}
+
+func handleHTTPTunnel(session *yamux.Session, controlStream net.Conn, req *protocol.TunnelRequest, remote string) {
 	// Generate a human-readable subdomain with collision check.
 	var subdomain string
 	for range 10 {
@@ -258,6 +279,147 @@ func handleConnection(conn net.Conn) {
 
 	registry.Unregister(subdomain)
 	slog.Info("tunnel unregistered", "subdomain", subdomain, "remote", remote)
+}
+
+func handleTCPTunnel(session *yamux.Session, controlStream net.Conn, req *protocol.TunnelRequest, remote string) {
+	port, err := portAlloc.Allocate()
+	if err != nil {
+		resp := &protocol.TunnelResponse{Success: false, Error: fmt.Sprintf("port allocation failed: %v", err)}
+		protocol.WriteResponse(controlStream, resp)
+		controlStream.Close()
+		return
+	}
+
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		portAlloc.Release(port)
+		resp := &protocol.TunnelResponse{Success: false, Error: fmt.Sprintf("failed to listen on port %d: %v", port, err)}
+		protocol.WriteResponse(controlStream, resp)
+		controlStream.Close()
+		return
+	}
+
+	entry := &tunnel.TunnelEntry{
+		Session:     session,
+		ConnectedAt: timeNow(),
+		Protocol:    protocol.ProtoTCP,
+		LocalPort:   req.LocalPort,
+		PublicPort:  port,
+		Listener:    ln,
+	}
+	registry.RegisterPort(port, entry)
+
+	resp := &protocol.TunnelResponse{Port: port, Success: true}
+	if err := protocol.WriteResponse(controlStream, resp); err != nil {
+		slog.Error("failed to send tunnel response", "remote", remote, "error", err)
+		registry.UnregisterPort(port)
+		portAlloc.Release(port)
+		controlStream.Close()
+		return
+	}
+	controlStream.Close()
+
+	slog.Info("TCP tunnel registered", "port", port, "remote", remote)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go tunnel.ServeTCP(ctx, ln, session)
+
+	// Block until the client disconnects.
+	for {
+		stream, err := session.Accept()
+		if err != nil {
+			if err == io.EOF {
+				slog.Info("client disconnected", "port", port, "remote", remote)
+			} else {
+				slog.Warn("session error", "port", port, "remote", remote, "error", err)
+			}
+			break
+		}
+		stream.Close()
+	}
+
+	cancel()
+	ln.Close()
+	registry.UnregisterPort(port)
+	portAlloc.Release(port)
+	slog.Info("TCP tunnel unregistered", "port", port, "remote", remote)
+}
+
+func handleUDPTunnel(session *yamux.Session, controlStream net.Conn, req *protocol.TunnelRequest, remote string) {
+	port, err := portAlloc.Allocate()
+	if err != nil {
+		resp := &protocol.TunnelResponse{Success: false, Error: fmt.Sprintf("port allocation failed: %v", err)}
+		protocol.WriteResponse(controlStream, resp)
+		controlStream.Close()
+		return
+	}
+
+	udpAddr, err := net.ResolveUDPAddr("udp", fmt.Sprintf(":%d", port))
+	if err != nil {
+		portAlloc.Release(port)
+		resp := &protocol.TunnelResponse{Success: false, Error: fmt.Sprintf("failed to resolve UDP address: %v", err)}
+		protocol.WriteResponse(controlStream, resp)
+		controlStream.Close()
+		return
+	}
+
+	udpConn, err := net.ListenUDP("udp", udpAddr)
+	if err != nil {
+		portAlloc.Release(port)
+		resp := &protocol.TunnelResponse{Success: false, Error: fmt.Sprintf("failed to listen on UDP port %d: %v", port, err)}
+		protocol.WriteResponse(controlStream, resp)
+		controlStream.Close()
+		return
+	}
+
+	entry := &tunnel.TunnelEntry{
+		Session:     session,
+		ConnectedAt: timeNow(),
+		Protocol:    protocol.ProtoUDP,
+		LocalPort:   req.LocalPort,
+		PublicPort:  port,
+		Listener:    udpConn,
+	}
+	registry.RegisterPort(port, entry)
+
+	resp := &protocol.TunnelResponse{Port: port, Success: true}
+	if err := protocol.WriteResponse(controlStream, resp); err != nil {
+		slog.Error("failed to send tunnel response", "remote", remote, "error", err)
+		registry.UnregisterPort(port)
+		portAlloc.Release(port)
+		controlStream.Close()
+		return
+	}
+	controlStream.Close()
+
+	slog.Info("UDP tunnel registered", "port", port, "remote", remote)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	go tunnel.ServeUDP(ctx, udpConn, session)
+
+	// Block until the client disconnects.
+	for {
+		stream, err := session.Accept()
+		if err != nil {
+			if err == io.EOF {
+				slog.Info("client disconnected", "port", port, "remote", remote)
+			} else {
+				slog.Warn("session error", "port", port, "remote", remote, "error", err)
+			}
+			break
+		}
+		stream.Close()
+	}
+
+	cancel()
+	udpConn.Close()
+	registry.UnregisterPort(port)
+	portAlloc.Release(port)
+	slog.Info("UDP tunnel unregistered", "port", port, "remote", remote)
 }
 
 func handleHTTP(w http.ResponseWriter, r *http.Request) {
@@ -434,15 +596,23 @@ func writeRaw401(conn net.Conn) {
 	resp.Write(conn)
 }
 
+// timeNow is a seam for testing.
+var timeNow = time.Now
+
 // initDefaultConfig initializes cfg with defaults for tests that don't call main().
 func initDefaultConfig() {
 	if cfg == nil {
 		cfg = &config.ServerConfig{
-			BaseDomain:  "localhost",
-			PublicPort:  8080,
-			AdminPort:   8081,
-			ControlPort: 7000,
+			BaseDomain:     "localhost",
+			PublicPort:     8080,
+			AdminPort:      8081,
+			ControlPort:    7000,
+			PortRangeStart: 10000,
+			PortRangeEnd:   20000,
 		}
+	}
+	if portAlloc == nil {
+		portAlloc = tunnel.NewPortAllocator(cfg.PortRangeStart, cfg.PortRangeEnd)
 	}
 }
 
