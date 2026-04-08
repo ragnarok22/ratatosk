@@ -36,3 +36,23 @@ tls_cert_file: ""
 # Path to the TLS private key file (PEM format).
 # For Let's Encrypt: /etc/letsencrypt/live/tunnel.example.com/privkey.pem
 tls_key_file: ""
+
+# Automatic TLS Configuration (via Let's Encrypt DNS-01 challenge)
+# When enabled, certmagic automatically provisions and renews wildcard certificates.
+# This is mutually exclusive with tls_enabled (manual TLS).
+tls_auto: false
+
+# Email address for Let's Encrypt account registration.
+# Required when tls_auto is enabled.
+tls_email: ""
+
+# DNS provider for solving DNS-01 challenges.
+# Currently supported: "cloudflare"
+# Required when tls_auto is enabled.
+tls_provider: ""
+
+# API token for the DNS provider.
+# For Cloudflare: create a token with Zone:DNS:Edit permissions.
+# Required when tls_auto is enabled.
+# Best practice: set via RATATOSK_TLS_API_TOKEN environment variable instead of config file.
+tls_api_token: ""

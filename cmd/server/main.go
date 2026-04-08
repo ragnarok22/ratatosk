@@ -14,6 +14,7 @@ import (
 
 	"github.com/hashicorp/yamux"
 
+	autocert "ratatosk/internal/certmagic"
 	"ratatosk/internal/config"
 	"ratatosk/internal/protocol"
 	"ratatosk/internal/tunnel"
@@ -37,6 +38,7 @@ var (
 	serverListenTCP                   = net.Listen
 	serverResolveUDPAddr              = net.ResolveUDPAddr
 	serverListenUDP                   = net.ListenUDP
+	mainServeCertmagic                = autocert.SetupAndServe
 )
 
 func main() {
@@ -97,12 +99,19 @@ func loadServerConfig(loadConfig func() (*config.ServerConfig, error)) error {
 	}
 
 	cfg = loaded
+
+	tlsMode := "off"
+	if cfg.TLSAuto {
+		tlsMode = "auto"
+	} else if cfg.TLSEnabled {
+		tlsMode = "manual"
+	}
 	slog.Info("configuration loaded",
 		"base_domain", cfg.BaseDomain,
 		"public_port", cfg.PublicPort,
 		"admin_port", cfg.AdminPort,
 		"control_port", cfg.ControlPort,
-		"tls", cfg.TLSEnabled,
+		"tls_mode", tlsMode,
 	)
 	return nil
 }
@@ -172,6 +181,28 @@ func startPublicServer(
 	handler := http.HandlerFunc(handleHTTP)
 
 	go func() {
+		if cfg.TLSAuto {
+			slog.Info("starting automatic TLS via certmagic",
+				"base_domain", cfg.BaseDomain,
+				"email", cfg.TLSEmail,
+				"provider", cfg.TLSProvider,
+			)
+			cmCfg := autocert.Config{
+				Email:    cfg.TLSEmail,
+				Provider: cfg.TLSProvider,
+				APIToken: cfg.TLSAPIToken,
+				Domains:  []string{cfg.BaseDomain, "*." + cfg.BaseDomain},
+			}
+			err := mainServeCertmagic(cmCfg, handler)
+			select {
+			case <-stop:
+				errs <- nil
+			default:
+				errs <- err
+			}
+			return
+		}
+
 		if cfg.TLSEnabled {
 			// Start HTTP->HTTPS redirect on port 80.
 			go func() {

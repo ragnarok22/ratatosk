@@ -27,7 +27,8 @@ ProtectSystem=strict
 ProtectHome=true
 PrivateTmp=true
 ReadOnlyPaths=/etc/ratatosk
-ReadWritePaths=/var/log/ratatosk
+ReadWritePaths=/var/log/ratatosk /var/lib/ratatosk
+Environment=XDG_DATA_HOME=/var/lib/ratatosk
 
 # Environment (overrides config file values)
 # EnvironmentFile=-/etc/ratatosk/ratatosk.env

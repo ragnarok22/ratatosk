@@ -17,6 +17,10 @@ func clearConfigEnv(t *testing.T) {
 		"RATATOSK_ADMIN_PORT",
 		"RATATOSK_CONTROL_PORT",
 		"RATATOSK_TLS_ENABLED",
+		"RATATOSK_TLS_AUTO",
+		"RATATOSK_TLS_EMAIL",
+		"RATATOSK_TLS_PROVIDER",
+		"RATATOSK_TLS_API_TOKEN",
 		"RATATOSK_PORT_RANGE_START",
 		"RATATOSK_PORT_RANGE_END",
 	} {
@@ -77,6 +81,8 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	t.Setenv("RATATOSK_BASE_DOMAIN", "example.com")
 	t.Setenv("RATATOSK_PUBLIC_PORT", "443")
 	t.Setenv("RATATOSK_TLS_ENABLED", "true")
+	t.Setenv("RATATOSK_TLS_CERT_FILE", "/etc/ssl/cert.pem")
+	t.Setenv("RATATOSK_TLS_KEY_FILE", "/etc/ssl/key.pem")
 
 	cfg, err := LoadConfig()
 	if err != nil {
@@ -159,6 +165,8 @@ public_port: 9443
 admin_port: 9092
 control_port: 7100
 tls_enabled: true
+tls_cert_file: /etc/ssl/cert.pem
+tls_key_file: /etc/ssl/key.pem
 `,
 			wantBaseDomain:  "home.tunnel.dev",
 			wantPublicPort:  9443,
@@ -175,9 +183,11 @@ control_port: 7099
 tls_enabled: false
 `,
 			env: map[string]string{
-				"RATATOSK_BASE_DOMAIN": "env.tunnel.dev",
-				"RATATOSK_PUBLIC_PORT": "443",
-				"RATATOSK_TLS_ENABLED": "true",
+				"RATATOSK_BASE_DOMAIN":   "env.tunnel.dev",
+				"RATATOSK_PUBLIC_PORT":   "443",
+				"RATATOSK_TLS_ENABLED":   "true",
+				"RATATOSK_TLS_CERT_FILE": "/etc/ssl/cert.pem",
+				"RATATOSK_TLS_KEY_FILE":  "/etc/ssl/key.pem",
 			},
 			wantBaseDomain:  "env.tunnel.dev",
 			wantPublicPort:  443,
@@ -338,6 +348,12 @@ func TestTunnelURL(t *testing.T) {
 			subdomain: "app",
 			want:      "https://app.tunnel.dev:8443",
 		},
+		{
+			name:      "auto TLS on port 443",
+			cfg:       ServerConfig{BaseDomain: "tunnel.dev", PublicPort: 443, TLSAuto: true},
+			subdomain: "app",
+			want:      "https://app.tunnel.dev",
+		},
 	}
 
 	for _, tt := range tests {
@@ -360,5 +376,123 @@ func TestAddrs(t *testing.T) {
 	}
 	if cfg.ControlAddr() != ":7000" {
 		t.Errorf("ControlAddr = %q", cfg.ControlAddr())
+	}
+}
+
+func TestValidateHTTPPassesWithDefaults(t *testing.T) {
+	cfg := ServerConfig{BaseDomain: "localhost"}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestValidateTLSAutoAndEnabledMutuallyExclusive(t *testing.T) {
+	cfg := ServerConfig{TLSAuto: true, TLSEnabled: true}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error when both tls_auto and tls_enabled are true")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Fatalf("error = %q, want mention of mutually exclusive", err.Error())
+	}
+}
+
+func TestValidateTLSAutoRequiresEmail(t *testing.T) {
+	cfg := ServerConfig{
+		BaseDomain:  "tunnel.example.com",
+		TLSAuto:     true,
+		TLSProvider: "cloudflare",
+		TLSAPIToken: "token",
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error when tls_email is missing")
+	}
+	if !strings.Contains(err.Error(), "tls_email") {
+		t.Fatalf("error = %q, want mention of tls_email", err.Error())
+	}
+}
+
+func TestValidateTLSAutoRequiresProvider(t *testing.T) {
+	cfg := ServerConfig{
+		BaseDomain:  "tunnel.example.com",
+		TLSAuto:     true,
+		TLSEmail:    "admin@example.com",
+		TLSAPIToken: "token",
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error when tls_provider is missing")
+	}
+	if !strings.Contains(err.Error(), "tls_provider") {
+		t.Fatalf("error = %q, want mention of tls_provider", err.Error())
+	}
+}
+
+func TestValidateTLSAutoRequiresAPIToken(t *testing.T) {
+	cfg := ServerConfig{
+		BaseDomain:  "tunnel.example.com",
+		TLSAuto:     true,
+		TLSEmail:    "admin@example.com",
+		TLSProvider: "cloudflare",
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error when tls_api_token is missing")
+	}
+	if !strings.Contains(err.Error(), "tls_api_token") {
+		t.Fatalf("error = %q, want mention of tls_api_token", err.Error())
+	}
+}
+
+func TestValidateTLSAutoRejectsLocalhost(t *testing.T) {
+	cfg := ServerConfig{
+		BaseDomain:  "localhost",
+		TLSAuto:     true,
+		TLSEmail:    "admin@example.com",
+		TLSProvider: "cloudflare",
+		TLSAPIToken: "token",
+	}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error when base_domain is localhost with tls_auto")
+	}
+	if !strings.Contains(err.Error(), "localhost") {
+		t.Fatalf("error = %q, want mention of localhost", err.Error())
+	}
+}
+
+func TestValidateManualTLSRequiresCertAndKey(t *testing.T) {
+	cfg := ServerConfig{TLSEnabled: true}
+	err := cfg.Validate()
+	if err == nil {
+		t.Fatal("expected error when tls_cert_file and tls_key_file are missing")
+	}
+	if !strings.Contains(err.Error(), "tls_cert_file") {
+		t.Fatalf("error = %q, want mention of tls_cert_file", err.Error())
+	}
+}
+
+func TestValidateTLSAutoValid(t *testing.T) {
+	cfg := ServerConfig{
+		BaseDomain:  "tunnel.example.com",
+		TLSAuto:     true,
+		TLSEmail:    "admin@example.com",
+		TLSProvider: "cloudflare",
+		TLSAPIToken: "token",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestValidateManualTLSValid(t *testing.T) {
+	cfg := ServerConfig{
+		TLSEnabled:  true,
+		TLSCertFile: "/etc/ssl/cert.pem",
+		TLSKeyFile:  "/etc/ssl/key.pem",
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
 	}
 }

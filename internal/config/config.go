@@ -21,6 +21,10 @@ type ServerConfig struct {
 	TLSEnabled     bool   `mapstructure:"tls_enabled"`
 	TLSCertFile    string `mapstructure:"tls_cert_file"`
 	TLSKeyFile     string `mapstructure:"tls_key_file"`
+	TLSAuto        bool   `mapstructure:"tls_auto"`
+	TLSEmail       string `mapstructure:"tls_email"`
+	TLSProvider    string `mapstructure:"tls_provider"`
+	TLSAPIToken    string `mapstructure:"tls_api_token"`
 	PortRangeStart int    `mapstructure:"port_range_start"`
 	PortRangeEnd   int    `mapstructure:"port_range_end"`
 }
@@ -43,7 +47,7 @@ func (c *ServerConfig) ControlAddr() string {
 // TunnelURL returns the full URL for a given subdomain.
 func (c *ServerConfig) TunnelURL(subdomain string) string {
 	scheme := "http"
-	if c.TLSEnabled {
+	if c.TLSEnabled || c.TLSAuto {
 		scheme = "https"
 	}
 	host := subdomain + "." + c.BaseDomain
@@ -52,6 +56,33 @@ func (c *ServerConfig) TunnelURL(subdomain string) string {
 		return fmt.Sprintf("%s://%s", scheme, host)
 	}
 	return fmt.Sprintf("%s://%s:%d", scheme, host, c.PublicPort)
+}
+
+// Validate checks for invalid or conflicting TLS configuration.
+func (c *ServerConfig) Validate() error {
+	if c.TLSAuto && c.TLSEnabled {
+		return fmt.Errorf("tls_auto and tls_enabled are mutually exclusive")
+	}
+	if c.TLSAuto {
+		if c.TLSEmail == "" {
+			return fmt.Errorf("tls_email is required when tls_auto is enabled")
+		}
+		if c.TLSProvider == "" {
+			return fmt.Errorf("tls_provider is required when tls_auto is enabled")
+		}
+		if c.TLSAPIToken == "" {
+			return fmt.Errorf("tls_api_token is required when tls_auto is enabled")
+		}
+		if c.BaseDomain == "localhost" {
+			return fmt.Errorf("tls_auto requires a real base_domain, not localhost")
+		}
+	}
+	if c.TLSEnabled {
+		if c.TLSCertFile == "" || c.TLSKeyFile == "" {
+			return fmt.Errorf("tls_cert_file and tls_key_file are required when tls_enabled is true")
+		}
+	}
+	return nil
 }
 
 // LoadConfig reads configuration from file, environment variables, and defaults.
@@ -70,6 +101,10 @@ func LoadConfig() (*ServerConfig, error) {
 	v.SetDefault("tls_enabled", false)
 	v.SetDefault("tls_cert_file", "")
 	v.SetDefault("tls_key_file", "")
+	v.SetDefault("tls_auto", false)
+	v.SetDefault("tls_email", "")
+	v.SetDefault("tls_provider", "")
+	v.SetDefault("tls_api_token", "")
 	v.SetDefault("port_range_start", 10000)
 	v.SetDefault("port_range_end", 20000)
 
@@ -102,6 +137,10 @@ func LoadConfig() (*ServerConfig, error) {
 	var cfg ServerConfig
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("parsing config: %w", err)
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
 	return &cfg, nil

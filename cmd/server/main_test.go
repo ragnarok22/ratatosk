@@ -17,6 +17,7 @@ import (
 	"testing/fstest"
 	"time"
 
+	autocert "ratatosk/internal/certmagic"
 	"ratatosk/internal/config"
 	"ratatosk/internal/inspector"
 	"ratatosk/internal/protocol"
@@ -754,6 +755,121 @@ func TestStartPublicServerHTTPSRedirectError(t *testing.T) {
 
 	if err := <-errs; err != nil {
 		t.Fatalf("err = %v, want nil", err)
+	}
+}
+
+func TestStartPublicServerAutoTLS(t *testing.T) {
+	oldCfg := cfg
+	oldServeCertmagic := mainServeCertmagic
+	cfg = &config.ServerConfig{
+		BaseDomain:  "tunnel.example.com",
+		PublicPort:  443,
+		TLSAuto:     true,
+		TLSEmail:    "admin@example.com",
+		TLSProvider: "cloudflare",
+		TLSAPIToken: "test-token",
+	}
+	t.Cleanup(func() {
+		cfg = oldCfg
+		mainServeCertmagic = oldServeCertmagic
+	})
+
+	stop := make(chan struct{})
+	called := make(chan struct{})
+
+	mainServeCertmagic = func(cmCfg autocert.Config, handler http.Handler) error {
+		if cmCfg.Email != "admin@example.com" {
+			t.Fatalf("email = %q, want %q", cmCfg.Email, "admin@example.com")
+		}
+		if cmCfg.Provider != "cloudflare" {
+			t.Fatalf("provider = %q, want %q", cmCfg.Provider, "cloudflare")
+		}
+		if cmCfg.APIToken != "test-token" {
+			t.Fatalf("api_token = %q, want %q", cmCfg.APIToken, "test-token")
+		}
+		if len(cmCfg.Domains) != 2 {
+			t.Fatalf("domains = %v, want 2 entries", cmCfg.Domains)
+		}
+		if cmCfg.Domains[0] != "tunnel.example.com" {
+			t.Fatalf("domains[0] = %q, want %q", cmCfg.Domains[0], "tunnel.example.com")
+		}
+		if cmCfg.Domains[1] != "*.tunnel.example.com" {
+			t.Fatalf("domains[1] = %q, want %q", cmCfg.Domains[1], "*.tunnel.example.com")
+		}
+
+		// Verify handler is the HTTP proxy handler.
+		req := httptest.NewRequest(http.MethodGet, "/", nil)
+		req.Host = "localhost:443"
+		w := httptest.NewRecorder()
+		handler.ServeHTTP(w, req)
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want %d", w.Code, http.StatusBadRequest)
+		}
+
+		close(called)
+		<-stop
+		return nil
+	}
+
+	errs := startPublicServer(
+		stop,
+		func(string, http.Handler) error {
+			t.Fatal("serve should not be called")
+			return nil
+		},
+		func(string, string, string, http.Handler) error {
+			t.Fatal("serveTLS should not be called")
+			return nil
+		},
+	)
+
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("certmagic server was not started")
+	}
+
+	close(stop)
+	if err := <-errs; err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+}
+
+func TestStartPublicServerAutoTLSReturnsError(t *testing.T) {
+	oldCfg := cfg
+	oldServeCertmagic := mainServeCertmagic
+	cfg = &config.ServerConfig{
+		BaseDomain:  "tunnel.example.com",
+		PublicPort:  443,
+		TLSAuto:     true,
+		TLSEmail:    "admin@example.com",
+		TLSProvider: "cloudflare",
+		TLSAPIToken: "test-token",
+	}
+	t.Cleanup(func() {
+		cfg = oldCfg
+		mainServeCertmagic = oldServeCertmagic
+	})
+
+	wantErr := errors.New("certmagic failed")
+	mainServeCertmagic = func(cmCfg autocert.Config, handler http.Handler) error {
+		return wantErr
+	}
+
+	errs := startPublicServer(
+		make(chan struct{}),
+		func(string, http.Handler) error {
+			t.Fatal("serve should not be called")
+			return nil
+		},
+		func(string, string, string, http.Handler) error {
+			t.Fatal("serveTLS should not be called")
+			return nil
+		},
+	)
+
+	if err := <-errs; !errors.Is(err, wantErr) {
+		t.Fatalf("err = %v, want %v", err, wantErr)
 	}
 }
 

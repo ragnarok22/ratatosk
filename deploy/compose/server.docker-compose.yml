@@ -11,6 +11,8 @@ services:
     container_name: ratatosk-server
     restart: unless-stopped
     ports:
+      - "80:80"
+      - "443:443"
       - "${RATATOSK_CONTROL_PORT:-7000}:7000"
       - "${RATATOSK_PUBLIC_PORT:-8080}:8080"
       - "${RATATOSK_ADMIN_PORT:-8081}:8081"
@@ -22,12 +24,18 @@ services:
       - RATATOSK_TLS_ENABLED=${RATATOSK_TLS_ENABLED:-false}
       - RATATOSK_TLS_CERT_FILE=${RATATOSK_TLS_CERT_FILE:-}
       - RATATOSK_TLS_KEY_FILE=${RATATOSK_TLS_KEY_FILE:-}
+      - RATATOSK_TLS_AUTO=${RATATOSK_TLS_AUTO:-false}
+      - RATATOSK_TLS_EMAIL=${RATATOSK_TLS_EMAIL:-}
+      - RATATOSK_TLS_PROVIDER=${RATATOSK_TLS_PROVIDER:-}
+      - RATATOSK_TLS_API_TOKEN=${RATATOSK_TLS_API_TOKEN:-}
+      - XDG_DATA_HOME=/data
     volumes:
-      # Uncomment and adjust for TLS certificates (e.g., Let's Encrypt)
+      # Persistent storage for automatic TLS certificates (certmagic)
+      - ratatosk-certs:/data/certmagic
+      # Uncomment and adjust for manual TLS certificates (e.g., certbot)
       # - /etc/letsencrypt:/etc/letsencrypt:ro
       # Uncomment to use a config file instead of env vars
       # - ./ratatosk.yaml:/etc/ratatosk/ratatosk.yaml:ro
-      []
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
 
@@ -40,3 +48,6 @@ x-casaos:
   icon: https://raw.githubusercontent.com/ragnarok22/ratatosk/main/ratatosk-logo.png
   category: Network
   port_map: "8081"
+
+volumes:
+  ratatosk-certs:
