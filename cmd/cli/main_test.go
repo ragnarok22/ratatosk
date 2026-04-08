@@ -58,7 +58,12 @@ func TestRunClientHappyPath(t *testing.T) {
 			Subdomain: "test-happy",
 		})
 		cs.Close()
-		// Server session close triggers EOF on client Accept loop.
+
+		// Allow the client time to read the response and enter its Accept
+		// loop before the deferred session/conn Close tears everything down.
+		// Without this pause the race detector + CI resource pressure can
+		// cause the client's WriteRequest to hit a "session shutdown" error.
+		time.Sleep(100 * time.Millisecond)
 	})
 
 	if err := runClient(addr, 13001); err != nil {
@@ -263,6 +268,9 @@ func TestRunClientStreamerBanner(t *testing.T) {
 			Subdomain: "test-streamer",
 		})
 		cs.Close()
+
+		// Same stabilisation pause as TestRunClientHappyPath — see comment there.
+		time.Sleep(100 * time.Millisecond)
 	})
 
 	runClient(addr, 9999)

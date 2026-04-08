@@ -66,6 +66,6 @@ var nouns = []string{
 func GenerateSubdomain() string {
 	adj := adjectives[rand.IntN(len(adjectives))]
 	noun := nouns[rand.IntN(len(nouns))]
-	num := rand.IntN(10000)
-	return fmt.Sprintf("%s-%s-%04d", adj, noun, num)
+	num := rand.IntN(1000000)
+	return fmt.Sprintf("%s-%s-%06d", adj, noun, num)
 }

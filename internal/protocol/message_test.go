@@ -84,7 +84,7 @@ func TestTunnelResponseOmitEmptyError(t *testing.T) {
 }
 
 func TestGenerateSubdomain(t *testing.T) {
-	pattern := regexp.MustCompile(`^[a-z]+-[a-z]+-\d{4}$`)
+	pattern := regexp.MustCompile(`^[a-z]+-[a-z]+-\d{6}$`)
 	for range 100 {
 		sub := GenerateSubdomain()
 		if !pattern.MatchString(sub) {
