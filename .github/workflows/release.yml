@@ -60,6 +60,17 @@ jobs:
               go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" -o "$output" ./cmd/cli
           done
 
+      - name: Package CLI Tarballs
+        run: |
+          for bin in dist/ratatosk-cli-*; do
+            [ "$bin" = "dist/ratatosk-cli-windows-amd64.exe" ] && continue
+            name=$(basename "$bin")
+            cp "$bin" ratatosk
+            chmod +x ratatosk
+            tar -czf "dist/${name}.tar.gz" ratatosk
+            rm ratatosk
+          done
+
       - name: Prepare Deploy Artifacts
         run: |
           cp deploy/ratatosk.yaml.example dist/
@@ -101,6 +112,9 @@ jobs:
             dist/ratatosk-cli-darwin-arm64
             dist/ratatosk-cli-darwin-amd64
             dist/ratatosk-cli-windows-amd64.exe
+            dist/ratatosk-cli-linux-amd64.tar.gz
+            dist/ratatosk-cli-darwin-arm64.tar.gz
+            dist/ratatosk-cli-darwin-amd64.tar.gz
             dist/ratatosk.yaml.example
             dist/ratatosk.service
             dist/Dockerfile.server
@@ -109,21 +123,21 @@ jobs:
     needs: release
     runs-on: ubuntu-latest
     steps:
-      - name: Download release binaries
+      - name: Download release tarballs
         run: |
           tag=${GITHUB_REF#refs/tags/}
           base_url="https://github.com/${{ github.repository }}/releases/download/${tag}"
-          mkdir -p binaries
-          for bin in ratatosk-cli-darwin-arm64 ratatosk-cli-darwin-amd64 ratatosk-cli-linux-amd64; do
-            curl -fsSL "${base_url}/${bin}" -o "binaries/${bin}"
+          mkdir -p tarballs
+          for name in ratatosk-cli-darwin-arm64 ratatosk-cli-darwin-amd64 ratatosk-cli-linux-amd64; do
+            curl -fsSL "${base_url}/${name}.tar.gz" -o "tarballs/${name}.tar.gz"
           done
 
       - name: Calculate SHA256 hashes
         id: hashes
         run: |
-          echo "darwin_arm64=$(sha256sum binaries/ratatosk-cli-darwin-arm64 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "darwin_amd64=$(sha256sum binaries/ratatosk-cli-darwin-amd64 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "linux_amd64=$(sha256sum binaries/ratatosk-cli-linux-amd64 | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "darwin_arm64=$(sha256sum tarballs/ratatosk-cli-darwin-arm64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "darwin_amd64=$(sha256sum tarballs/ratatosk-cli-darwin-amd64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          echo "linux_amd64=$(sha256sum tarballs/ratatosk-cli-linux-amd64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
 
       - name: Update Homebrew formula
         env:
@@ -147,23 +161,23 @@ jobs:
 
             on_macos do
               if Hardware::CPU.arm?
-                url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-darwin-arm64"
+                url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-darwin-arm64.tar.gz"
                 sha256 "${{ steps.hashes.outputs.darwin_arm64 }}"
               elsif Hardware::CPU.intel?
-                url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-darwin-amd64"
+                url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-darwin-amd64.tar.gz"
                 sha256 "${{ steps.hashes.outputs.darwin_amd64 }}"
               end
             end
 
             on_linux do
               if Hardware::CPU.intel?
-                url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-linux-amd64"
+                url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-linux-amd64.tar.gz"
                 sha256 "${{ steps.hashes.outputs.linux_amd64 }}"
               end
             end
 
             def install
-              bin.install Dir["ratatosk-cli-*"].first => "ratatosk"
+              bin.install "ratatosk"
             end
 
             test do
