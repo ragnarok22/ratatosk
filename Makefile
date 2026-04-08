@@ -1,7 +1,7 @@
 .PHONY: dev-server dev-cli dev-dashboard build build-dashboard clean format lint test test-race coverage
 
-dev-server:
-	go run -tags dev ./cmd/server
+dev-server: build-dashboard
+	go run ./cmd/server
 
 dev-cli:
 	go run ./cmd/cli

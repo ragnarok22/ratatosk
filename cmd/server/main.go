@@ -1,13 +1,15 @@
 package main
 
 import (
+	"bufio"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"strings"
-	"sync"
+
+	"github.com/hashicorp/yamux"
 
 	"ratatosk/internal/protocol"
 	"ratatosk/internal/tunnel"
@@ -158,56 +160,90 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Open a yamux stream to the CLI client.
-	stream, err := session.Open()
-	if err != nil {
-		slog.Error("failed to open stream", "subdomain", subdomain, "error", err)
-		http.Error(w, "tunnel unavailable", http.StatusBadGateway)
-		return
-	}
-
 	// Hijack the public-facing HTTP connection to get the raw net.Conn.
 	hijacker, ok := w.(http.Hijacker)
 	if !ok {
 		slog.Error("hijacking not supported")
-		stream.Close()
 		http.Error(w, "internal error", http.StatusInternalServerError)
 		return
 	}
-	clientConn, _, err := hijacker.Hijack()
+	clientConn, clientBuf, err := hijacker.Hijack()
 	if err != nil {
 		slog.Error("hijack failed", "error", err)
-		stream.Close()
+		return
+	}
+	defer clientConn.Close()
+
+	// Proxy the first request (already parsed by net/http) and then loop
+	// to handle subsequent keep-alive requests on the same connection.
+	if !proxyRequest(r, subdomain, session, clientConn) {
 		return
 	}
 
-	// Write the original HTTP request in wire format into the yamux stream.
+	// Read further requests from the hijacked connection (keep-alive).
+	reader := clientBuf.Reader
+	for {
+		req, err := http.ReadRequest(reader)
+		if err != nil {
+			return // client closed connection or malformed request
+		}
+		// Re-extract subdomain — the Host header could theoretically differ,
+		// but in practice it stays the same on a keep-alive connection.
+		h := req.Host
+		if idx := strings.LastIndex(h, ":"); idx != -1 {
+			h = h[:idx]
+		}
+		p := strings.SplitN(h, ".", 2)
+		if len(p) < 2 {
+			return
+		}
+		sub := p[0]
+		sess, ok := registry.GetSession(sub)
+		if !ok {
+			return
+		}
+		if !proxyRequest(req, sub, sess, clientConn) {
+			return
+		}
+	}
+}
+
+// proxyRequest opens a yamux stream, forwards the HTTP request through it,
+// and copies the response back to clientConn. Returns true if the connection
+// can be reused for another request (keep-alive).
+func proxyRequest(r *http.Request, subdomain string, session *yamux.Session, clientConn net.Conn) bool {
+	stream, err := session.Open()
+	if err != nil {
+		slog.Error("failed to open stream", "subdomain", subdomain, "error", err)
+		return false
+	}
+	defer stream.Close()
+
+	// Write the HTTP request in wire format into the yamux stream.
 	if err := r.Write(stream); err != nil {
 		slog.Error("failed to write request to stream", "subdomain", subdomain, "error", err)
-		stream.Close()
-		clientConn.Close()
-		return
+		return false
 	}
 
 	slog.Info("proxying request", "subdomain", subdomain, "method", r.Method, "path", r.URL.Path)
 
-	// Bidirectional pipe between the browser and the yamux stream.
-	var wg sync.WaitGroup
-	wg.Add(2)
+	// For requests with a body (POST, PUT, etc.), copy remaining data
+	// from the browser to the stream in the background.
+	if r.ContentLength > 0 || r.TransferEncoding != nil {
+		go io.Copy(stream, clientConn)
+	}
 
-	// Response: stream → browser
-	go func() {
-		defer wg.Done()
-		io.Copy(clientConn, stream)
-	}()
+	// Copy the response from the yamux stream back to the browser.
+	// When the CLI finishes writing the response and closes the stream,
+	// this returns with EOF.
+	resp, err := http.ReadResponse(bufio.NewReader(stream), r)
+	if err != nil {
+		slog.Error("failed to read response from stream", "subdomain", subdomain, "error", err)
+		return false
+	}
+	defer resp.Body.Close()
 
-	// Remaining client data: browser → stream
-	go func() {
-		defer wg.Done()
-		io.Copy(stream, clientConn)
-	}()
-
-	wg.Wait()
-	stream.Close()
-	clientConn.Close()
+	// Write the response back to the browser in wire format.
+	err = resp.Write(clientConn)
+	return err == nil
 }
