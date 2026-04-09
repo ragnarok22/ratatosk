@@ -10,6 +10,36 @@ Configuring the public infrastructure — especially Wildcard certificates — i
 - For manual TLS: `certbot` installed on the VPS (`sudo apt install certbot` on Debian/Ubuntu)
 - For automatic TLS: a Cloudflare API token with Zone:DNS:Edit permissions
 
+## Quick Install
+
+The fastest way to get Ratatosk running on a VPS. This script downloads the latest server binary, creates a systemd service, and scaffolds a config file:
+
+```sh
+curl -sSL https://raw.githubusercontent.com/ragnarok22/ratatosk/main/deploy/install.sh | sudo bash
+```
+
+**What the script does:**
+
+- Downloads the latest `ratatosk-server` binary to `/usr/local/bin/`
+- Grants the binary `CAP_NET_BIND_SERVICE` so it can bind ports 80/443 without root
+- Creates a `ratatosk` system user (no home directory, no login shell)
+- Sets up `/etc/ratatosk/`, `/var/log/ratatosk/`, and `/var/lib/ratatosk/`
+- Installs the systemd service file and runs `daemon-reload`
+- Generates a starter config at `/etc/ratatosk/ratatosk.yaml` (skipped if one already exists)
+
+After installation, configure DNS ([Step 1](#step-1-configure-dns-records)), then edit the config and start the server:
+
+```sh
+sudo nano /etc/ratatosk/ratatosk.yaml   # set your domain and TLS settings
+sudo systemctl enable --now ratatosk
+```
+
+::: tip
+The script is idempotent — you can re-run it to upgrade the binary. Your existing config file will not be overwritten.
+:::
+
+If you prefer to install manually, follow the steps below.
+
 ## Step 1: Configure DNS Records
 
 Go to your domain's admin panel (Cloudflare, Namecheap, Route53, etc.) and create two records pointing to your VPS public IP.

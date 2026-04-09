@@ -51,11 +51,21 @@ chmod +x ratatosk && sudo mv ratatosk /usr/local/bin/
 
 ### Run the Server
 
+**VPS (bare metal):**
+
+```sh
+curl -sSL https://raw.githubusercontent.com/ragnarok22/ratatosk/main/deploy/install.sh | sudo bash
+```
+
+**Docker:**
+
 ```sh
 docker run -d --name ratatosk \
   -p 7000:7000 -p 8080:8080 -p 8081:8081 \
   ghcr.io/ragnarok22/ratatosk-server
 ```
+
+See the [Deployment Guide](https://ragnarok22.github.io/ratatosk/guide/deployment) for DNS, TLS, and production setup.
 
 ### Create a Tunnel
 
