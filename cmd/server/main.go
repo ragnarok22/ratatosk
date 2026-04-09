@@ -42,6 +42,12 @@ var (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "init" {
+		if code := runInit(); code != 0 {
+			mainExit(code)
+		}
+		return
+	}
 	if code := runMain(mainStdout, mainLoadConfig, mainListen, mainListenAndServe, mainListenAndServeTLS); code != 0 {
 		mainExit(code)
 	}

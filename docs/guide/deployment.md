@@ -1,79 +1,200 @@
 # Deployment Guide
 
-Configuring the public infrastructure — especially Wildcard certificates — is usually where most developers get stuck. This is a step-by-step survival guide to getting Ratatosk running on your VPS without losing your mind.
+This guide walks you through deploying the Ratatosk relay server on a public VPS. By the end, you'll have a fully working tunnel server with automatic HTTPS.
 
-## Prerequisites
+## The Golden Path (Recommended)
 
-- A VPS with a public IP address (e.g. `1.2.3.4`)
-- A domain you control (e.g. `yourdomain.com`)
+The fastest way to go from zero to a running tunnel server. This uses the automated installer and interactive setup wizard.
+
+::: info Prerequisites
+- A VPS with a public IP address (e.g., `1.2.3.4`)
+- A domain you control (e.g., `yourdomain.com`)
 - SSH access to the VPS
-- For manual TLS: `certbot` installed on the VPS (`sudo apt install certbot` on Debian/Ubuntu)
-- For automatic TLS: a Cloudflare API token with Zone:DNS:Edit permissions
-
-## Quick Install
-
-The fastest way to get Ratatosk running on a VPS. This script downloads the latest server binary, creates a systemd service, and scaffolds a config file:
-
-```sh
-curl -sSL https://raw.githubusercontent.com/ragnarok22/ratatosk/main/deploy/install.sh | sudo bash
-```
-
-**What the script does:**
-
-- Downloads the latest `ratatosk-server` binary to `/usr/local/bin/`
-- Grants the binary `CAP_NET_BIND_SERVICE` so it can bind ports 80/443 without root
-- Creates a `ratatosk` system user (no home directory, no login shell)
-- Sets up `/etc/ratatosk/`, `/var/log/ratatosk/`, and `/var/lib/ratatosk/`
-- Installs the systemd service file and runs `daemon-reload`
-- Generates a starter config at `/etc/ratatosk/ratatosk.yaml` (skipped if one already exists)
-
-After installation, configure DNS ([Step 1](#step-1-configure-dns-records)), then edit the config and start the server:
-
-```sh
-sudo nano /etc/ratatosk/ratatosk.yaml   # set your domain and TLS settings
-sudo systemctl enable --now ratatosk
-```
-
-::: tip
-The script is idempotent — you can re-run it to upgrade the binary. Your existing config file will not be overwritten.
+- A Cloudflare account with an API token ([how to create one](#cloudflare-api-token-setup))
 :::
 
-If you prefer to install manually, follow the steps below.
+### 1. Configure DNS Records
 
-## Step 1: Configure DNS Records
+Go to your domain's DNS settings and create two records pointing to your VPS IP.
 
-Go to your domain's admin panel (Cloudflare, Namecheap, Route53, etc.) and create two records pointing to your VPS public IP.
+Assuming your tunnel domain is `tunnel.yourdomain.com`:
 
-Assuming you want your proxy to live at `tunnel.yourdomain.com`:
+| Type | Name/Host | Value |
+|------|-----------|-------|
+| A | `tunnel` | `1.2.3.4` |
+| A (or CNAME) | `*.tunnel` | `1.2.3.4` (or `tunnel.yourdomain.com`) |
 
-**A Record** (for the admin panel and base domain):
+::: warning Cloudflare Users
+Set Proxy status to **DNS Only** (grey cloud) for both records. Cloudflare's proxy can interfere with WebSocket traffic and raw TCP tunnels.
+:::
 
-| Field | Value |
-|---|---|
-| Type | A |
-| Name/Host | `tunnel` |
-| Destination/IP | `1.2.3.4` |
-
-**Wildcard Record** (for your local client tunnels):
-
-| Field | Value |
-|---|---|
-| Type | A (or CNAME) |
-| Name/Host | `*.tunnel` |
-| Destination/IP | `1.2.3.4` (or pointing to `tunnel.yourdomain.com`) |
-
-> **Cloudflare users:** Make sure to turn off the "Orange Cloud" (set Proxy status to **DNS Only**) for these records. WebSocket traffic and raw TCP tunnels can conflict with Cloudflare's free-tier proxy rules.
-
-Verify your DNS is working before continuing:
+Verify your DNS is working:
 
 ```sh
 dig tunnel.yourdomain.com        # should resolve to your VPS IP
 dig test.tunnel.yourdomain.com   # should also resolve to your VPS IP
 ```
 
-## Step 2: Generate the Wildcard SSL Certificate
+### 2. Install Ratatosk
 
-SSH into your VPS. You can't use the standard HTTP challenge here because you need to validate a wildcard (`*`) domain — this requires a DNS challenge.
+SSH into your VPS and run the one-line installer:
+
+```sh
+curl -sSL https://raw.githubusercontent.com/ragnarok22/ratatosk/main/deploy/install.sh | sudo bash
+```
+
+This downloads the latest binary, creates a systemd service, sets up the `ratatosk` system user, and prepares the directory structure.
+
+::: tip
+The script is idempotent — re-run it anytime to upgrade the binary. Your existing config will not be overwritten.
+:::
+
+### 3. Run the Setup Wizard
+
+Generate your config file interactively:
+
+```sh
+sudo ratatosk-server init
+```
+
+The wizard will ask you for:
+
+- Your base domain (e.g., `tunnel.yourdomain.com`)
+- Whether to enable automatic wildcard TLS via Let's Encrypt (recommended)
+- Your email address for certificate expiry notices
+- Your Cloudflare API token
+
+The config is saved to `/etc/ratatosk/ratatosk.yaml`.
+
+### 4. Start the Server
+
+```sh
+sudo systemctl enable --now ratatosk
+```
+
+Check that it's running:
+
+```sh
+sudo systemctl status ratatosk
+```
+
+To follow logs in real time:
+
+```sh
+sudo journalctl -u ratatosk -f
+```
+
+::: tip
+On first startup with automatic TLS, certificate provisioning may take 30–60 seconds while DNS challenges propagate. Subsequent starts use the cached certificate and are instant.
+:::
+
+### 5. Connect Your First Tunnel
+
+From your local machine, install the CLI and connect:
+
+```sh
+ratatosk --port 3000
+```
+
+You should get a tunnel URL like `https://golden-bifrost-004721.tunnel.yourdomain.com` pointing to your `localhost:3000`.
+
+## Cloudflare API Token Setup
+
+Automatic TLS requires a Cloudflare API token with specific permissions to create DNS records for the ACME DNS-01 challenge.
+
+::: warning Required Permission
+The API token **must** have **Zone:DNS:Edit** permission for your domain. Tokens with only read access will not work.
+:::
+
+To create a token:
+
+1. Go to [Cloudflare Dashboard > API Tokens](https://dash.cloudflare.com/profile/api-tokens)
+2. Click **Create Token**
+3. Use the **Edit zone DNS** template, or create a custom token with:
+   - **Permissions:** Zone > DNS > Edit
+   - **Zone Resources:** Include > Specific zone > your domain
+4. Copy the token and paste it into the setup wizard (or your config file)
+
+The token is stored in `/etc/ratatosk/ratatosk.yaml` with restricted file permissions (mode `0600`). For additional security, you can set it via the `RATATOSK_TLS_API_TOKEN` environment variable instead.
+
+## Docker Deployment
+
+If you prefer Docker over systemd, you can deploy Ratatosk as a container.
+
+### Docker Run
+
+```sh
+docker build -f deploy/Dockerfile.server -t ratatosk-server .
+
+docker run -d \
+  --name ratatosk \
+  --restart always \
+  -e RATATOSK_BASE_DOMAIN=tunnel.yourdomain.com \
+  -e RATATOSK_PUBLIC_PORT=443 \
+  -e RATATOSK_TLS_AUTO=true \
+  -e RATATOSK_TLS_EMAIL=you@yourdomain.com \
+  -e RATATOSK_TLS_PROVIDER=cloudflare \
+  -e RATATOSK_TLS_API_TOKEN=your-cloudflare-api-token \
+  -v ratatosk-certs:/data/certmagic \
+  -p 80:80 \
+  -p 443:443 \
+  -p 7000:7000 \
+  -p 8081:8081 \
+  ratatosk-server
+```
+
+### Docker Compose
+
+Docker Compose templates are available in [`deploy/compose/`](https://github.com/ragnarok22/ratatosk/tree/main/deploy/compose).
+
+**Server (VPS deployment):**
+
+```sh
+cd deploy/compose
+cp .env.example .env
+# Edit .env with your domain, ports, and TLS settings
+docker compose -f server.docker-compose.yml up -d
+```
+
+**Client (local machine / homelab):**
+
+```sh
+cd deploy/compose
+cp .env.example .env
+# Set RATATOSK_SERVER to your relay address
+docker compose -f client.docker-compose.yml up -d
+```
+
+The client uses `network_mode: host` on Linux so it can reach local services. On Docker Desktop (Mac/Windows), see the comments in the compose file for alternatives.
+
+**Full Stack (development):**
+
+```sh
+docker compose -f full-stack.docker-compose.yml up --build
+```
+
+## Home Assistant Add-on
+
+If you run Home Assistant, you can install Ratatosk as an add-on to expose your dashboard without port forwarding.
+
+1. In Home Assistant, go to **Settings > Add-ons > Add-on Store**
+2. Click the menu (top right) and select **Repositories**
+3. Add: `https://github.com/ragnarok22/ratatosk`
+4. Install "Ratatosk Tunnel" from the store
+5. Configure the `server` option with your relay server address (e.g., `tunnel.yourdomain.com:7000`)
+6. Start the add-on
+
+See [`home-assistant/ratatosk/DOCS.md`](https://github.com/ragnarok22/ratatosk/blob/main/home-assistant/ratatosk/DOCS.md) for full configuration options.
+
+## Advanced / Manual Setup
+
+::: info
+This section is for users who cannot use the automated installer or setup wizard — for example, if you're using a DNS provider other than Cloudflare, or need manual certificate management. Most users should follow [The Golden Path](#the-golden-path-recommended) instead.
+:::
+
+### Manual TLS with Certbot
+
+If you can't use automatic TLS, you can provision wildcard certificates manually with certbot using DNS-01 challenges.
 
 ```sh
 sudo certbot certonly \
@@ -83,65 +204,27 @@ sudo certbot certonly \
   -d "*.tunnel.yourdomain.com"
 ```
 
-What happens next:
+Certbot will ask you to create a TXT record (`_acme-challenge.tunnel`) in your DNS provider. Create the record, wait 2–5 minutes for propagation, then press Enter.
 
-1. Certbot will pause and ask you to create a **TXT record** in your DNS provider. It will give you a specific name (usually `_acme-challenge.tunnel`) and a long alphanumeric value.
-2. Go to your DNS provider and create that TXT record.
-3. Wait a couple of minutes for DNS propagation before pressing Enter in the Certbot terminal.
-4. If everything checks out, Certbot will tell you your certificates are saved at `/etc/letsencrypt/live/tunnel.yourdomain.com/`.
+Certificates are saved to `/etc/letsencrypt/live/tunnel.yourdomain.com/`.
 
-> **Pro tip:** If you use Cloudflare, install the `certbot-dns-cloudflare` plugin. This automates the TXT record step using an API key and allows certificates to auto-renew every 3 months without manual intervention:
->
-> ```sh
-> sudo apt install python3-certbot-dns-cloudflare
->
-> # Create /etc/letsencrypt/cloudflare.ini with:
-> #   dns_cloudflare_api_token = YOUR_API_TOKEN
-> sudo chmod 600 /etc/letsencrypt/cloudflare.ini
->
-> sudo certbot certonly \
->   --dns-cloudflare \
->   --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
->   -d "tunnel.yourdomain.com" \
->   -d "*.tunnel.yourdomain.com"
-> ```
-
-## Alternative: Automatic TLS (Skip Steps 2 and Cert Config)
-
-Instead of managing certificates manually with certbot, Ratatosk can automatically provision and renew Let's Encrypt wildcard certificates using DNS-01 challenges. This is the recommended approach -- no certbot required.
-
-You just need a Cloudflare API token with **Zone:DNS:Edit** permissions for your domain. Create one at [Cloudflare Dashboard > API Tokens](https://dash.cloudflare.com/profile/api-tokens).
-
-Skip Step 2 entirely and use this config in Step 4 instead:
-
-```yaml
-base_domain: tunnel.yourdomain.com
-public_port: 443
-admin_port: 8081
-control_port: 7000
-
-tls_auto: true
-tls_email: you@yourdomain.com
-tls_provider: cloudflare
-tls_api_token: your-cloudflare-api-token
-```
-
-Or via environment variables (recommended for the API token):
+**Cloudflare DNS plugin (automates renewal):**
 
 ```sh
-export RATATOSK_TLS_AUTO=true
-export RATATOSK_TLS_EMAIL=you@yourdomain.com
-export RATATOSK_TLS_PROVIDER=cloudflare
-export RATATOSK_TLS_API_TOKEN=your-cloudflare-api-token
+sudo apt install python3-certbot-dns-cloudflare
+
+# Create /etc/letsencrypt/cloudflare.ini with:
+#   dns_cloudflare_api_token = YOUR_API_TOKEN
+sudo chmod 600 /etc/letsencrypt/cloudflare.ini
+
+sudo certbot certonly \
+  --dns-cloudflare \
+  --dns-cloudflare-credentials /etc/letsencrypt/cloudflare.ini \
+  -d "tunnel.yourdomain.com" \
+  -d "*.tunnel.yourdomain.com"
 ```
 
-On first startup, the server will solve DNS challenges and provision the certificate automatically. This may take 30-60 seconds. Subsequent starts use the cached certificate. Certificates are stored under `$XDG_DATA_HOME/certmagic` (defaults to `~/.local/share/certmagic`).
-
-::: tip
-With automatic TLS, you don't need to install certbot, set filesystem ACLs for certificate files, or worry about renewal -- it's all handled for you.
-:::
-
-## Step 3: Build and Upload the Binary
+### Build from Source
 
 On your local machine, cross-compile for Linux:
 
@@ -163,17 +246,17 @@ sudo mv /tmp/ratatosk-server /usr/local/bin/ratatosk-server
 sudo chmod +x /usr/local/bin/ratatosk-server
 ```
 
-## Step 4: Configure Ratatosk on the VPS
+### Manual Configuration
 
-Create the config directory and file:
+Create directories and the config file:
 
 ```sh
 sudo mkdir -p /etc/ratatosk /var/log/ratatosk /var/lib/ratatosk
 ```
 
-Create `/etc/ratatosk/ratatosk.yaml` with your production values.
+Create `/etc/ratatosk/ratatosk.yaml`:
 
-**With automatic TLS (recommended):**
+**With automatic TLS:**
 
 ```yaml
 base_domain: tunnel.yourdomain.com
@@ -200,7 +283,7 @@ tls_cert_file: /etc/letsencrypt/live/tunnel.yourdomain.com/fullchain.pem
 tls_key_file: /etc/letsencrypt/live/tunnel.yourdomain.com/privkey.pem
 ```
 
-## Step 5: Set Up the Systemd Service
+### Systemd Service (Manual)
 
 Create a dedicated system user:
 
@@ -209,7 +292,7 @@ sudo useradd --system --no-create-home --shell /usr/sbin/nologin ratatosk
 sudo chown -R ratatosk:ratatosk /etc/ratatosk /var/log/ratatosk
 ```
 
-Let's Encrypt certificates are only readable by root by default. Grant the `ratatosk` user read access:
+If using manual TLS, grant the `ratatosk` user read access to certificates:
 
 ```sh
 sudo setfacl -m u:ratatosk:rX /etc/letsencrypt/live /etc/letsencrypt/archive
@@ -217,131 +300,43 @@ sudo setfacl -m u:ratatosk:r /etc/letsencrypt/live/tunnel.yourdomain.com/fullcha
 sudo setfacl -m u:ratatosk:r /etc/letsencrypt/live/tunnel.yourdomain.com/privkey.pem
 ```
 
-Copy the service file and start it:
+Install the systemd service:
 
 ```sh
 sudo cp deploy/ratatosk.service /etc/systemd/system/
 sudo systemctl daemon-reload
-sudo systemctl enable ratatosk
-sudo systemctl start ratatosk
+sudo systemctl enable --now ratatosk
 ```
 
-Check that it's running:
+### Certificate Renewal
+
+- **Automatic TLS (`tls_auto`):** Certificates are renewed automatically — no action needed.
+- **Certbot with DNS plugin:** Renewals happen automatically via a systemd timer.
+- **Certbot with manual DNS:** You must repeat the DNS challenge process every 90 days. After renewal, restart the server:
 
 ```sh
-sudo systemctl status ratatosk
+sudo systemctl restart ratatosk
 ```
-
-If the status shows **active (running)**, open `https://tunnel.yourdomain.com:8081` in your browser. You should see the React dashboard running in the cloud with a green padlock.
-
-To follow logs in real time:
-
-```sh
-sudo journalctl -u ratatosk -f
-```
-
-## Step 6: The Moment of Truth
-
-With the server running on your VPS, connect from your local machine:
-
-```sh
-ratatosk --port 3000
-```
-
-You should get a tunnel URL like `https://golden-bifrost-004721.tunnel.yourdomain.com` pointing to your `localhost:3000`.
-
-## Deploying with Docker (Alternative)
-
-If you prefer Docker over Systemd:
-
-```sh
-docker build -f deploy/Dockerfile.server -t ratatosk-server .
-
-docker run -d \
-  --name ratatosk \
-  --restart always \
-  -v /etc/ratatosk/ratatosk.yaml:/etc/ratatosk/ratatosk.yaml:ro \
-  -v /etc/letsencrypt:/etc/letsencrypt:ro \
-  -p 80:80 \
-  -p 443:443 \
-  -p 7000:7000 \
-  -p 8081:8081 \
-  ratatosk-server
-```
-
-Or using environment variables instead of a config file:
-
-```sh
-docker run -d \
-  --name ratatosk \
-  --restart always \
-  -e RATATOSK_BASE_DOMAIN=tunnel.yourdomain.com \
-  -e RATATOSK_PUBLIC_PORT=443 \
-  -e RATATOSK_TLS_ENABLED=true \
-  -e RATATOSK_TLS_CERT_FILE=/etc/letsencrypt/live/tunnel.yourdomain.com/fullchain.pem \
-  -e RATATOSK_TLS_KEY_FILE=/etc/letsencrypt/live/tunnel.yourdomain.com/privkey.pem \
-  -v /etc/letsencrypt:/etc/letsencrypt:ro \
-  -p 80:80 \
-  -p 443:443 \
-  -p 7000:7000 \
-  -p 8081:8081 \
-  ratatosk-server
-```
-
-## Deploying with Docker Compose
-
-Docker Compose templates are available in [`deploy/compose/`](https://github.com/ragnarok22/ratatosk/tree/main/deploy/compose) for both server and client deployments.
-
-### Server
-
-```sh
-cd deploy/compose
-cp .env.example .env
-# Edit .env with your domain, ports, and TLS settings
-docker compose -f server.docker-compose.yml up -d
-```
-
-### Client
-
-```sh
-cd deploy/compose
-cp .env.example .env
-# Set RATATOSK_SERVER to your relay address
-docker compose -f client.docker-compose.yml up -d
-```
-
-The client uses `network_mode: host` on Linux so it can reach local services. On Docker Desktop (Mac/Windows), see the comments in the compose file for alternatives.
-
-### Full Stack (Development)
-
-For local testing with both server and client:
-
-```sh
-docker compose -f full-stack.docker-compose.yml up --build
-```
-
-## Home Assistant Add-on
-
-If you run Home Assistant, you can install Ratatosk as an add-on to expose your dashboard without port forwarding.
-
-1. In Home Assistant, go to **Settings > Add-ons > Add-on Store**
-2. Click the menu (top right) and select **Repositories**
-3. Add: `https://github.com/ragnarok22/ratatosk`
-4. Install "Ratatosk Tunnel" from the store
-5. Configure the `server` option with your relay server address (e.g., `tunnel.yourdomain.com:7000`)
-6. Start the add-on
-
-The add-on exposes your HA instance (default port 8123) through the tunnel. See [`home-assistant/ratatosk/DOCS.md`](https://github.com/ragnarok22/ratatosk/blob/main/home-assistant/ratatosk/DOCS.md) for full configuration options.
 
 ## Troubleshooting
 
 **"bind: permission denied" on port 443 or 80**
 
-The Systemd unit grants `CAP_NET_BIND_SERVICE` so the `ratatosk` user can bind privileged ports. If running manually, either use `sudo` or bind to a high port and front it with a reverse proxy.
+The systemd unit grants `CAP_NET_BIND_SERVICE` so the `ratatosk` user can bind privileged ports. If running manually, either use `sudo` or bind to a high port and front it with a reverse proxy.
+
+**Setup wizard fails with "permission denied"**
+
+The wizard writes to `/etc/ratatosk/ratatosk.yaml` when run as root. Make sure to use `sudo`:
+
+```sh
+sudo ratatosk-server init
+```
+
+If running without root, the config is written to `./ratatosk.yaml` in the current directory.
 
 **Certbot fails the DNS challenge**
 
-DNS propagation can take time. Wait 2-5 minutes after creating the TXT record before pressing Enter. You can verify propagation with:
+DNS propagation can take time. Wait 2–5 minutes after creating the TXT record before pressing Enter. Verify propagation with:
 
 ```sh
 dig TXT _acme-challenge.tunnel.yourdomain.com
@@ -355,14 +350,6 @@ Make sure port `7000` (TCP control plane) is open in your VPS firewall:
 sudo ufw allow 7000/tcp   # if using ufw
 ```
 
-**Certificate renewal**
+**Automatic TLS: first startup is slow**
 
-If using `tls_auto`, certificates are renewed automatically by the server -- no action needed. If using manual TLS with certbot, Let's Encrypt certificates expire every 90 days. If you used the Cloudflare DNS plugin, `certbot renew` runs automatically via a systemd timer. For manual DNS challenges, you'll need to repeat the process. After renewal, restart the server:
-
-```sh
-sudo systemctl restart ratatosk
-```
-
-**Automatic TLS: "first startup is slow"**
-
-When using `tls_auto`, the first startup may take 30-60 seconds while DNS challenges propagate. This is normal. Subsequent starts use the cached certificate and are instant. Check logs with `journalctl -u ratatosk -f` to see the progress.
+When using `tls_auto`, the first startup may take 30–60 seconds while DNS challenges propagate. This is normal. Subsequent starts use the cached certificate and are instant. Check logs with `journalctl -u ratatosk -f` to see progress.

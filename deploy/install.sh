@@ -143,30 +143,6 @@ curl -fsSL -o "${SERVICE_FILE}" \
 systemctl daemon-reload
 success "Systemd service installed and daemon reloaded"
 
-# -- Scaffold configuration file -------------------------------------------
-
-if [[ ! -f "${CONFIG_DIR}/ratatosk.yaml" ]]; then
-    cat > "${CONFIG_DIR}/ratatosk.yaml" <<'YAML'
-# Ratatosk Relay Server Configuration
-# Full reference: https://ragnarok22.github.io/ratatosk/reference/configuration
-
-base_domain: tunnel.example.com     # CHANGE ME: your wildcard DNS domain
-public_port: 443
-admin_port: 8081
-control_port: 7000
-
-# Automatic TLS via Let's Encrypt DNS-01 (recommended)
-tls_auto: true
-tls_email: ""                       # CHANGE ME: your email for Let's Encrypt
-tls_provider: cloudflare            # Currently supported: cloudflare
-tls_api_token: ""                   # CHANGE ME: Cloudflare API token (Zone:DNS:Edit)
-YAML
-    chown ratatosk:ratatosk "${CONFIG_DIR}/ratatosk.yaml"
-    success "Created starter config at ${CONFIG_DIR}/ratatosk.yaml"
-else
-    info "Config file ${CONFIG_DIR}/ratatosk.yaml already exists, skipping"
-fi
-
 # -- Done ------------------------------------------------------------------
 
 printf "\n"
@@ -175,13 +151,16 @@ printf "${GREEN}${BOLD}  Ratatosk installed successfully!${RESET}\n"
 printf "${GREEN}${BOLD}=======================================${RESET}\n"
 printf "\n"
 printf "  Binary:   ${INSTALL_DIR}/${BINARY_NAME}\n"
-printf "  Config:   ${CONFIG_DIR}/ratatosk.yaml\n"
 printf "  Service:  ${SERVICE_FILE}\n"
 printf "  Logs:     journalctl -u ratatosk -f\n"
 printf "\n"
+printf "${YELLOW}${BOLD}  Run the interactive setup wizard to configure your server:${RESET}\n"
+printf "\n"
+printf "       ${BOLD}sudo ratatosk-server init${RESET}\n"
+printf "\n"
 printf "${BOLD}Next steps:${RESET}\n"
-printf "  1. Edit ${CONFIG_DIR}/ratatosk.yaml with your domain and TLS settings\n"
-printf "  2. Make sure your DNS records are configured (see deployment guide)\n"
+printf "  1. Configure DNS records (see deployment guide)\n"
+printf "  2. Run the setup wizard:  ${BOLD}sudo ratatosk-server init${RESET}\n"
 printf "  3. Open firewall ports if needed: 443/tcp, 7000/tcp, 8081/tcp\n"
 printf "  4. Start the server:\n"
 printf "       ${BOLD}sudo systemctl enable --now ratatosk${RESET}\n"
