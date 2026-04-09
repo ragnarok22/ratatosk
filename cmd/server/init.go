@@ -72,16 +72,43 @@ port_range_start: 10000
 port_range_end: 20000
 `
 
-func renderConfig(answers initAnswers) ([]byte, error) {
-	tmpl, err := template.New("config").Parse(configTemplate)
-	if err != nil {
-		return nil, fmt.Errorf("parsing config template: %w", err)
-	}
+var initConfigTmpl = template.Must(template.New("config").Parse(configTemplate))
+
+func renderConfig(tmpl *template.Template, answers initAnswers) ([]byte, error) {
 	var buf bytes.Buffer
 	if err := tmpl.Execute(&buf, answers); err != nil {
 		return nil, fmt.Errorf("rendering config: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+func validateDomain(s string) error {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return fmt.Errorf("domain is required")
+	}
+	if !strings.Contains(s, ".") {
+		return fmt.Errorf("enter a valid domain (e.g., tunnel.example.com)")
+	}
+	return nil
+}
+
+func validateEmail(s string) error {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return fmt.Errorf("email is required for Let's Encrypt")
+	}
+	if !strings.Contains(s, "@") {
+		return fmt.Errorf("enter a valid email address")
+	}
+	return nil
+}
+
+func validateAPIToken(s string) error {
+	if strings.TrimSpace(s) == "" {
+		return fmt.Errorf("API token is required for automatic TLS")
+	}
+	return nil
 }
 
 func configDir() string {
@@ -106,16 +133,7 @@ func runInit() int {
 				Description("Tunnels will be accessible at <subdomain>.<domain>").
 				Placeholder("tunnel.example.com").
 				Value(&answers.BaseDomain).
-				Validate(func(s string) error {
-					s = strings.TrimSpace(s)
-					if s == "" {
-						return fmt.Errorf("domain is required")
-					}
-					if !strings.Contains(s, ".") {
-						return fmt.Errorf("enter a valid domain (e.g., tunnel.example.com)")
-					}
-					return nil
-				}),
+				Validate(validateDomain),
 		),
 		huh.NewGroup(
 			huh.NewConfirm().
@@ -131,16 +149,7 @@ func runInit() int {
 				Description("Used for Let's Encrypt certificate expiry notices").
 				Placeholder("you@example.com").
 				Value(&answers.TLSEmail).
-				Validate(func(s string) error {
-					s = strings.TrimSpace(s)
-					if s == "" {
-						return fmt.Errorf("email is required for Let's Encrypt")
-					}
-					if !strings.Contains(s, "@") {
-						return fmt.Errorf("enter a valid email address")
-					}
-					return nil
-				}),
+				Validate(validateEmail),
 			huh.NewSelect[string]().
 				Title("Select your DNS provider").
 				Description("Used to solve DNS-01 challenges for wildcard certificates").
@@ -153,12 +162,7 @@ func runInit() int {
 				Description("For Cloudflare: create a token with Zone:DNS:Edit permissions").
 				EchoMode(huh.EchoModePassword).
 				Value(&answers.TLSAPIToken).
-				Validate(func(s string) error {
-					if strings.TrimSpace(s) == "" {
-						return fmt.Errorf("API token is required for automatic TLS")
-					}
-					return nil
-				}),
+				Validate(validateAPIToken),
 		).WithHideFunc(func() bool { return !answers.TLSAuto }),
 	)
 
@@ -175,7 +179,7 @@ func runInit() int {
 	answers.TLSEmail = strings.TrimSpace(answers.TLSEmail)
 	answers.TLSAPIToken = strings.TrimSpace(answers.TLSAPIToken)
 
-	data, err := renderConfig(answers)
+	data, err := renderConfig(initConfigTmpl, answers)
 	if err != nil {
 		fmt.Fprintf(initStdout, "\n  Error generating config: %v\n", err)
 		return 1

@@ -6,10 +6,73 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"text/template"
 
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/viper"
 )
+
+func TestValidateDomain(t *testing.T) {
+	tests := []struct {
+		input   string
+		wantErr bool
+	}{
+		{"tunnel.example.com", false},
+		{"a.b", false},
+		{"", true},
+		{"   ", true},
+		{"localhost", true},
+		{"nodot", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			err := validateDomain(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateDomain(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateEmail(t *testing.T) {
+	tests := []struct {
+		input   string
+		wantErr bool
+	}{
+		{"user@example.com", false},
+		{"a@b", false},
+		{"", true},
+		{"   ", true},
+		{"noatsign", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			err := validateEmail(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateEmail(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestValidateAPIToken(t *testing.T) {
+	tests := []struct {
+		input   string
+		wantErr bool
+	}{
+		{"some-token-value", false},
+		{"", true},
+		{"   ", true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.input, func(t *testing.T) {
+			err := validateAPIToken(tt.input)
+			if (err != nil) != tt.wantErr {
+				t.Errorf("validateAPIToken(%q) error = %v, wantErr %v", tt.input, err, tt.wantErr)
+			}
+		})
+	}
+}
 
 func TestConfigDir(t *testing.T) {
 	tests := []struct {
@@ -42,7 +105,7 @@ func TestRenderConfigWithTLS(t *testing.T) {
 		TLSAPIToken: "cf-token-secret",
 	}
 
-	data, err := renderConfig(answers)
+	data, err := renderConfig(initConfigTmpl, answers)
 	if err != nil {
 		t.Fatalf("renderConfig() error = %v", err)
 	}
@@ -79,7 +142,7 @@ func TestRenderConfigWithoutTLS(t *testing.T) {
 		TLSAuto:    false,
 	}
 
-	data, err := renderConfig(answers)
+	data, err := renderConfig(initConfigTmpl, answers)
 	if err != nil {
 		t.Fatalf("renderConfig() error = %v", err)
 	}
@@ -108,7 +171,7 @@ func TestRenderConfigWithoutTLS(t *testing.T) {
 func TestRenderConfigPortRange(t *testing.T) {
 	answers := initAnswers{BaseDomain: "test.dev", TLSAuto: false}
 
-	data, err := renderConfig(answers)
+	data, err := renderConfig(initConfigTmpl, answers)
 	if err != nil {
 		t.Fatalf("renderConfig() error = %v", err)
 	}
@@ -124,6 +187,14 @@ func TestRenderConfigPortRange(t *testing.T) {
 	}
 	if got := v.GetInt("port_range_end"); got != 20000 {
 		t.Errorf("port_range_end = %d, want 20000", got)
+	}
+}
+
+func TestRenderConfigTemplateError(t *testing.T) {
+	badTmpl := template.Must(template.New("bad").Parse("{{ .Missing.Nested }}"))
+	_, err := renderConfig(badTmpl, initAnswers{})
+	if err == nil {
+		t.Fatal("renderConfig() with bad template should return error")
 	}
 }
 
@@ -365,6 +436,23 @@ func stubInitDeps(t *testing.T, stdout *bytes.Buffer) {
 	initWriteFile = func(string, []byte, os.FileMode) error { return nil }
 	initRunForm = func(*huh.Form) error { return nil }
 	initConfirmOverwrite = func(string) (bool, error) { return false, nil }
+}
+
+func TestRunInitRenderError(t *testing.T) {
+	var stdout bytes.Buffer
+	stubInitDeps(t, &stdout)
+
+	oldTmpl := initConfigTmpl
+	initConfigTmpl = template.Must(template.New("bad").Parse("{{ .Missing.Nested }}"))
+	t.Cleanup(func() { initConfigTmpl = oldTmpl })
+
+	code := runInit()
+	if code != 1 {
+		t.Fatalf("runInit() = %d, want 1", code)
+	}
+	if !strings.Contains(stdout.String(), "Error generating config") {
+		t.Errorf("output missing render error message: %s", stdout.String())
+	}
 }
 
 func TestRunInitOverwriteConfirmed(t *testing.T) {
