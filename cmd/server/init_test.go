@@ -338,3 +338,119 @@ func TestRunInitFormError(t *testing.T) {
 		t.Fatalf("runInit() = %d, want 1 for form error", code)
 	}
 }
+
+// stubInitDeps saves and restores all init.go function vars.
+func stubInitDeps(t *testing.T, stdout *bytes.Buffer) {
+	t.Helper()
+	oldStdout := initStdout
+	oldGetEUID := initGetEUID
+	oldWriteFile := initWriteFile
+	oldMkdirAll := initMkdirAll
+	oldStat := initStat
+	oldRunForm := initRunForm
+	oldConfirmOverwrite := initConfirmOverwrite
+	t.Cleanup(func() {
+		initStdout = oldStdout
+		initGetEUID = oldGetEUID
+		initWriteFile = oldWriteFile
+		initMkdirAll = oldMkdirAll
+		initStat = oldStat
+		initRunForm = oldRunForm
+		initConfirmOverwrite = oldConfirmOverwrite
+	})
+	initStdout = stdout
+	initGetEUID = func() int { return 1000 }
+	initMkdirAll = func(string, os.FileMode) error { return nil }
+	initStat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
+	initWriteFile = func(string, []byte, os.FileMode) error { return nil }
+	initRunForm = func(*huh.Form) error { return nil }
+	initConfirmOverwrite = func(string) (bool, error) { return false, nil }
+}
+
+func TestRunInitOverwriteConfirmed(t *testing.T) {
+	var stdout bytes.Buffer
+	var written bool
+	stubInitDeps(t, &stdout)
+
+	initStat = func(string) (os.FileInfo, error) { return nil, nil }
+	initConfirmOverwrite = func(string) (bool, error) { return true, nil }
+	initWriteFile = func(string, []byte, os.FileMode) error {
+		written = true
+		return nil
+	}
+
+	code := runInit()
+	if code != 0 {
+		t.Fatalf("runInit() = %d, want 0", code)
+	}
+	if !written {
+		t.Error("expected file to be written when overwrite is confirmed")
+	}
+	if !strings.Contains(stdout.String(), "Configuration saved successfully") {
+		t.Errorf("output missing success message: %s", stdout.String())
+	}
+}
+
+func TestRunInitOverwriteDeclined(t *testing.T) {
+	var stdout bytes.Buffer
+	var written bool
+	stubInitDeps(t, &stdout)
+
+	initStat = func(string) (os.FileInfo, error) { return nil, nil }
+	initConfirmOverwrite = func(string) (bool, error) { return false, nil }
+	initWriteFile = func(string, []byte, os.FileMode) error {
+		written = true
+		return nil
+	}
+
+	code := runInit()
+	if code != 0 {
+		t.Fatalf("runInit() = %d, want 0", code)
+	}
+	if written {
+		t.Error("expected file NOT to be written when overwrite is declined")
+	}
+	if !strings.Contains(stdout.String(), "Keeping existing config") {
+		t.Errorf("output missing keep message: %s", stdout.String())
+	}
+}
+
+func TestRunInitOverwriteFormError(t *testing.T) {
+	var stdout bytes.Buffer
+	stubInitDeps(t, &stdout)
+
+	initStat = func(string) (os.FileInfo, error) { return nil, nil }
+	initConfirmOverwrite = func(string) (bool, error) { return false, os.ErrClosed }
+
+	code := runInit()
+	if code != 1 {
+		t.Fatalf("runInit() = %d, want 1", code)
+	}
+}
+
+func TestConfirmOverwrite(t *testing.T) {
+	oldRunForm := initRunForm
+	t.Cleanup(func() { initRunForm = oldRunForm })
+
+	initRunForm = func(f *huh.Form) error { return nil }
+
+	got, err := confirmOverwrite("/etc/ratatosk/ratatosk.yaml")
+	if err != nil {
+		t.Fatalf("confirmOverwrite() error = %v", err)
+	}
+	if got {
+		t.Error("confirmOverwrite() = true, want false (default)")
+	}
+}
+
+func TestConfirmOverwriteError(t *testing.T) {
+	oldRunForm := initRunForm
+	t.Cleanup(func() { initRunForm = oldRunForm })
+
+	initRunForm = func(f *huh.Form) error { return os.ErrClosed }
+
+	_, err := confirmOverwrite("/etc/ratatosk/ratatosk.yaml")
+	if err == nil {
+		t.Fatal("confirmOverwrite() error = nil, want error")
+	}
+}

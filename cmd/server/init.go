@@ -14,13 +14,31 @@ import (
 )
 
 var (
-	initGetEUID             = func() int { return os.Geteuid() }
-	initWriteFile           = os.WriteFile
-	initMkdirAll            = os.MkdirAll
-	initStat                = os.Stat
-	initRunForm             = func(f *huh.Form) error { return f.Run() }
-	initStdout    io.Writer = os.Stdout
+	initGetEUID                    = func() int { return os.Geteuid() }
+	initWriteFile                  = os.WriteFile
+	initMkdirAll                   = os.MkdirAll
+	initStat                       = os.Stat
+	initRunForm                    = func(f *huh.Form) error { return f.Run() }
+	initConfirmOverwrite           = confirmOverwrite
+	initStdout           io.Writer = os.Stdout
 )
+
+func confirmOverwrite(path string) (bool, error) {
+	var overwrite bool
+	form := huh.NewForm(
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title(fmt.Sprintf("Config file already exists at %s. Overwrite?", path)).
+				Affirmative("Yes").
+				Negative("No").
+				Value(&overwrite),
+		),
+	)
+	if err := initRunForm(form); err != nil {
+		return false, err
+	}
+	return overwrite, nil
+}
 
 type initAnswers struct {
 	BaseDomain  string
@@ -167,17 +185,8 @@ func runInit() int {
 	outPath := filepath.Join(dir, "ratatosk.yaml")
 
 	if _, err := initStat(outPath); err == nil {
-		var overwrite bool
-		overwriteForm := huh.NewForm(
-			huh.NewGroup(
-				huh.NewConfirm().
-					Title(fmt.Sprintf("Config file already exists at %s. Overwrite?", outPath)).
-					Affirmative("Yes").
-					Negative("No").
-					Value(&overwrite),
-			),
-		)
-		if err := initRunForm(overwriteForm); err != nil {
+		overwrite, err := initConfirmOverwrite(outPath)
+		if err != nil {
 			fmt.Fprintf(initStdout, "\n  Error: %v\n", err)
 			return 1
 		}
