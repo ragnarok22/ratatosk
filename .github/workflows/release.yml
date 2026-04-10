@@ -147,10 +147,12 @@ jobs:
       - name: Calculate SHA256 hashes
         id: hashes
         run: |
-          echo "darwin_arm64=$(sha256sum tarballs/ratatosk-cli-darwin-arm64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "darwin_amd64=$(sha256sum tarballs/ratatosk-cli-darwin-amd64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "linux_amd64=$(sha256sum tarballs/ratatosk-cli-linux-amd64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
-          echo "linux_arm64=$(sha256sum tarballs/ratatosk-cli-linux-arm64.tar.gz | awk '{print $1}')" >> "$GITHUB_OUTPUT"
+          {
+            echo "darwin_arm64=$(sha256sum tarballs/ratatosk-cli-darwin-arm64.tar.gz | awk '{print $1}')"
+            echo "darwin_amd64=$(sha256sum tarballs/ratatosk-cli-darwin-amd64.tar.gz | awk '{print $1}')"
+            echo "linux_amd64=$(sha256sum tarballs/ratatosk-cli-linux-amd64.tar.gz | awk '{print $1}')"
+            echo "linux_arm64=$(sha256sum tarballs/ratatosk-cli-linux-arm64.tar.gz | awk '{print $1}')"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Update Homebrew formula
         env:
