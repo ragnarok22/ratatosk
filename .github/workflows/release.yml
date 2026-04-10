@@ -166,41 +166,41 @@ jobs:
           mkdir -p Formula
 
           cat > Formula/ratatosk.rb <<FORMULA
-class Ratatosk < Formula
-  desc "Self-hosted, open-source alternative to ngrok"
-  homepage "https://github.com/${repo}"
-  version "${version}"
-  license "GPL-3.0-or-later"
+          class Ratatosk < Formula
+            desc "Self-hosted, open-source alternative to ngrok"
+            homepage "https://github.com/${repo}"
+            version "${version}"
+            license "GPL-3.0-or-later"
 
-  on_macos do
-    if Hardware::CPU.arm?
-      url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-darwin-arm64.tar.gz"
-      sha256 "${{ steps.hashes.outputs.darwin_arm64 }}"
-    elsif Hardware::CPU.intel?
-      url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-darwin-amd64.tar.gz"
-      sha256 "${{ steps.hashes.outputs.darwin_amd64 }}"
-    end
-  end
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-darwin-arm64.tar.gz"
+                sha256 "${{ steps.hashes.outputs.darwin_arm64 }}"
+              elsif Hardware::CPU.intel?
+                url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-darwin-amd64.tar.gz"
+                sha256 "${{ steps.hashes.outputs.darwin_amd64 }}"
+              end
+            end
 
-  on_linux do
-    if Hardware::CPU.arm?
-      url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-linux-arm64.tar.gz"
-      sha256 "${{ steps.hashes.outputs.linux_arm64 }}"
-    elsif Hardware::CPU.intel?
-      url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-linux-amd64.tar.gz"
-      sha256 "${{ steps.hashes.outputs.linux_amd64 }}"
-    end
-  end
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-linux-arm64.tar.gz"
+                sha256 "${{ steps.hashes.outputs.linux_arm64 }}"
+              elsif Hardware::CPU.intel?
+                url "https://github.com/${repo}/releases/download/v#{version}/ratatosk-cli-linux-amd64.tar.gz"
+                sha256 "${{ steps.hashes.outputs.linux_amd64 }}"
+              end
+            end
 
-  def install
-    bin.install "ratatosk"
-  end
+            def install
+              bin.install "ratatosk"
+            end
 
-  test do
-    system "#{bin}/ratatosk", "version"
-  end
-end
-FORMULA
+            test do
+              system "#{bin}/ratatosk", "version"
+            end
+          end
+          FORMULA
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
