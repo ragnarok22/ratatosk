@@ -111,6 +111,31 @@ func TestStartServerAllPortsBusy(t *testing.T) {
 	}
 }
 
+func TestStartServerCustomHost(t *testing.T) {
+	logger := NewLogger()
+	addr, err := StartServer(logger, "0.0.0.0")
+	if err != nil {
+		t.Fatalf("StartServer with 0.0.0.0 failed: %v", err)
+	}
+
+	// When binding 0.0.0.0 the OS may report the address as [::]:port.
+	// Either form means "all interfaces", so just extract the port and verify.
+	_, port, perr := net.SplitHostPort(addr)
+	if perr != nil {
+		t.Fatalf("unexpected address format %q: %v", addr, perr)
+	}
+
+	resp, err := http.Get("http://127.0.0.1:" + port + "/api/logs")
+	if err != nil {
+		t.Fatalf("GET /api/logs via 0.0.0.0 binding failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+}
+
 func TestAPILogsAfterTraffic(t *testing.T) {
 	logger := NewLogger()
 	logger.Add(TrafficLog{Method: "POST", Path: "/data", RespStatus: 201})

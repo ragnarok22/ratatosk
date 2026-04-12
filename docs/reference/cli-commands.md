@@ -18,6 +18,7 @@ ratatosk [command] [flags]
 | `ratatosk --server host:port` | Connect to a specific relay server (default: `localhost:7000`) |
 | `ratatosk --basic-auth user:pass` | Require HTTP Basic Auth for tunnel visitors |
 | `ratatosk --streamer` | Enable streamer mode (redact sensitive data from output) |
+| `ratatosk --inspector-host 0.0.0.0` | Bind the inspector UI to all interfaces (for Docker) |
 | `ratatosk version` | Print the CLI version |
 | `ratatosk self-update` | Check for updates and self-update |
 
@@ -130,6 +131,17 @@ Ratatosk                        (Ctrl+C to quit)
 
 Forwarding      http://golden-bifrost-004721.tunnel.example.com -> http://localhost:[REDACTED]
 Web Interface   http://[REDACTED]
+```
+
+### `--inspector-host`
+
+Set the bind address for the local traffic inspector web UI. By default it binds to `127.0.0.1` (localhost only). Set to `0.0.0.0` to listen on all interfaces, which is required when running inside Docker and connecting from another container (e.g., a Home Assistant integration).
+
+- **Type:** string
+- **Default:** `127.0.0.1`
+
+```sh
+ratatosk --port 3000 --inspector-host 0.0.0.0
 ```
 
 ## Self-Update

@@ -438,6 +438,33 @@ func TestRunStreamerFlagAndClientError(t *testing.T) {
 	}
 }
 
+func TestRunInspectorHostFlag(t *testing.T) {
+	oldHost := cliInspectorHost
+	oldLogger := slog.Default()
+	oldRedact := redact.Enabled
+	t.Cleanup(func() {
+		cliInspectorHost = oldHost
+		slog.SetDefault(oldLogger)
+		redact.Enabled = oldRedact
+	})
+
+	var stdout, stderr bytes.Buffer
+
+	run(
+		[]string{"ratatosk", "-inspector-host", "0.0.0.0"},
+		func(string) string { return "" },
+		&stdout,
+		&stderr,
+		func(string) error { return nil },
+		func(string, int, string) error { return nil },
+		noopRawClient,
+	)
+
+	if cliInspectorHost != "0.0.0.0" {
+		t.Fatalf("cliInspectorHost = %q, want %q", cliInspectorHost, "0.0.0.0")
+	}
+}
+
 func TestRunClientHappyPath(t *testing.T) {
 	addr := startMockRelay(t, func(conn net.Conn) {
 		defer conn.Close()
