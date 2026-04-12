@@ -1,6 +1,7 @@
 ## Repository Directives
 
 - Run coverage and tests with `make` or `pnpm` when possible.
+- After finishing the work, run `make format`, then `make lint`, and finally the tests.
 - If creating a commit or PR, do not add co-authors.
 - When a bug is reported, start by writing a test that reproduces it. Then use subagents to try fixes and prove the result with a passing test.
 - Do not suppress lint warnings just to get clean output.
