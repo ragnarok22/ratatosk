@@ -1503,3 +1503,112 @@ func TestRunSelfUpdateDoesNotCheckUpdate(t *testing.T) {
 		t.Fatalf("code = %d, want 0", code)
 	}
 }
+
+func TestNotifyUpdatePassesCorrectVersion(t *testing.T) {
+	oldCheckUpdate := cliCheckUpdate
+	t.Cleanup(func() { cliCheckUpdate = oldCheckUpdate })
+
+	var receivedVersion string
+	cliCheckUpdate = func(v string) string {
+		receivedVersion = v
+		return ""
+	}
+
+	var buf bytes.Buffer
+	notifyUpdate(&buf, "v3.5.0")
+
+	if receivedVersion != "v3.5.0" {
+		t.Fatalf("checkUpdate received %q, want %q", receivedVersion, "v3.5.0")
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("output = %q, want empty when up to date", buf.String())
+	}
+}
+
+func TestRunHTTPCommandTriggersUpdateCheck(t *testing.T) {
+	oldLogger := slog.Default()
+	oldRedact := redact.Enabled
+	oldCheckUpdate := cliCheckUpdate
+	oldVersion := Version
+	t.Cleanup(func() {
+		slog.SetDefault(oldLogger)
+		redact.Enabled = oldRedact
+		cliCheckUpdate = oldCheckUpdate
+		Version = oldVersion
+	})
+
+	checked := make(chan string, 1)
+	cliCheckUpdate = func(v string) string {
+		checked <- v
+		return ""
+	}
+	Version = "v1.2.3"
+
+	var stdout, stderr bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		run(
+			[]string{"ratatosk"},
+			func(string) string { return "" },
+			&stdout, &stderr,
+			func(string) error { return nil },
+			func(string, int, string) error { return nil },
+			noopRawClient,
+		)
+		close(done)
+	}()
+
+	select {
+	case v := <-checked:
+		if v != "v1.2.3" {
+			t.Fatalf("checkUpdate received %q, want %q", v, "v1.2.3")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("update check was not triggered for HTTP command")
+	}
+
+	<-done
+}
+
+func TestRunTCPCommandTriggersUpdateCheck(t *testing.T) {
+	oldLogger := slog.Default()
+	oldCheckUpdate := cliCheckUpdate
+	oldVersion := Version
+	t.Cleanup(func() {
+		slog.SetDefault(oldLogger)
+		cliCheckUpdate = oldCheckUpdate
+		Version = oldVersion
+	})
+
+	checked := make(chan string, 1)
+	cliCheckUpdate = func(v string) string {
+		checked <- v
+		return ""
+	}
+	Version = "v4.0.0"
+
+	var stdout, stderr bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		run(
+			[]string{"ratatosk", "tcp", "8080"},
+			func(string) string { return "" },
+			&stdout, &stderr,
+			func(string) error { return nil },
+			func(string, int, string) error { return nil },
+			func(string, int, string) error { return nil },
+		)
+		close(done)
+	}()
+
+	select {
+	case v := <-checked:
+		if v != "v4.0.0" {
+			t.Fatalf("checkUpdate received %q, want %q", v, "v4.0.0")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("update check was not triggered for TCP command")
+	}
+
+	<-done
+}

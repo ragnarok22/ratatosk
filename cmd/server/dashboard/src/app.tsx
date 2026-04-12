@@ -61,9 +61,7 @@ function App() {
           Ratatosk Admin
         </h1>
         {versionInfo && (
-          <span className="text-xs text-[#8b949e]">
-            {versionInfo.version}
-          </span>
+          <span className="text-xs text-[#8b949e]">{versionInfo.version}</span>
         )}
         <span className="rounded-full bg-[#30363d] px-2.5 py-0.5 text-xs font-semibold text-[#c9d1d9]">
           {tunnels.length} tunnel{tunnels.length !== 1 ? 's' : ''}

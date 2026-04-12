@@ -2595,3 +2595,112 @@ func TestAdminAPIVersionUpdateAvailable(t *testing.T) {
 		t.Fatalf("latest_version = %q, want %q", resp.LatestVersion, "v2.0.0")
 	}
 }
+
+func TestAdminAPIVersionDevBuild(t *testing.T) {
+	handler := newAdminHandlerFS(registry, fstest.MapFS{
+		"dashboard/dist/index.html": {Data: []byte("<html></html>")},
+	}, "dev", func(v string) string {
+		if v != "dev" {
+			t.Fatalf("checkUpdate received %q, want %q", v, "dev")
+		}
+		return ""
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/version", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var resp versionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Version != "dev" {
+		t.Fatalf("version = %q, want %q", resp.Version, "dev")
+	}
+	if resp.UpdateAvail {
+		t.Fatal("update_available = true, want false for dev build")
+	}
+}
+
+func TestAdminAPIVersionContentType(t *testing.T) {
+	handler := newAdminHandlerFS(registry, fstest.MapFS{
+		"dashboard/dist/index.html": {Data: []byte("<html></html>")},
+	}, "v1.0.0", noopCheckUpdate)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/version", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	ct := w.Header().Get("Content-Type")
+	if ct != "application/json" {
+		t.Fatalf("content-type = %q, want application/json", ct)
+	}
+}
+
+func TestRunMainStartupUpdateCheck(t *testing.T) {
+	oldCfg := cfg
+	oldCheckUpdate := serverCheckUpdate
+	oldStartControlPlane := serverStartControlPlane
+	oldStartAdminServer := serverStartAdminServer
+	oldStartPublicServer := serverStartPublicServer
+	oldVersion := Version
+	t.Cleanup(func() {
+		cfg = oldCfg
+		serverCheckUpdate = oldCheckUpdate
+		serverStartControlPlane = oldStartControlPlane
+		serverStartAdminServer = oldStartAdminServer
+		serverStartPublicServer = oldStartPublicServer
+		Version = oldVersion
+	})
+
+	checked := make(chan string, 1)
+	serverCheckUpdate = func(v string) string {
+		checked <- v
+		return "v9.0.0"
+	}
+	Version = "v1.0.0"
+
+	serverStartControlPlane = func(stop <-chan struct{}, listen func(string, string) (net.Listener, error)) error {
+		return nil
+	}
+	adminErrs := make(chan error, 1)
+	serverStartAdminServer = func(stop <-chan struct{}, serve func(string, http.Handler) error) <-chan error {
+		return adminErrs
+	}
+	serverStartPublicServer = func(stop <-chan struct{}, serve func(string, http.Handler) error, serveTLS func(string, string, string, http.Handler) error) <-chan error {
+		return make(chan error, 1)
+	}
+
+	var stdout bytes.Buffer
+	done := make(chan struct{})
+	go func() {
+		runMain(&stdout, func() (*config.ServerConfig, error) {
+			return &config.ServerConfig{
+				BaseDomain:     "localhost",
+				PublicPort:     8080,
+				AdminPort:      8081,
+				ControlPort:    7000,
+				PortRangeStart: 34000,
+				PortRangeEnd:   34010,
+			}, nil
+		}, nil, nil, nil)
+		close(done)
+	}()
+
+	select {
+	case v := <-checked:
+		if v != "v1.0.0" {
+			t.Fatalf("checkUpdate received %q, want %q", v, "v1.0.0")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("startup update check was not called")
+	}
+
+	// Unblock runMain so the goroutine completes before cleanup.
+	adminErrs <- nil
+	<-done
+}

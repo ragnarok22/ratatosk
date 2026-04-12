@@ -96,14 +96,14 @@ func runMain(
 
 	portAlloc = tunnel.NewPortAllocator(cfg.PortRangeStart, cfg.PortRangeEnd)
 
-	go func() {
-		if latest := serverCheckUpdate(Version); latest != "" {
+	go func(checkFn func(string) string, ver string) {
+		if latest := checkFn(ver); latest != "" {
 			slog.Warn("a new version of Ratatosk is available",
-				"current", Version,
+				"current", ver,
 				"latest", latest,
 			)
 		}
-	}()
+	}(serverCheckUpdate, Version)
 
 	stop := make(chan struct{})
 

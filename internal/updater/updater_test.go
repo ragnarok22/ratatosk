@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -322,6 +324,93 @@ func TestCheckForUpdateCacheUpToDate(t *testing.T) {
 
 	if got := CheckForUpdate("v1.0.0"); got != "" {
 		t.Fatalf("cached call = %q, want empty", got)
+	}
+}
+
+func TestCheckForUpdateCorruptCache(t *testing.T) {
+	stubCache(t)
+	oldFetchLatest := updaterFetchLatest
+	t.Cleanup(func() { updaterFetchLatest = oldFetchLatest })
+
+	// Write garbage to the cache file.
+	path, err := cacheFilePath()
+	if err != nil {
+		t.Fatalf("cacheFilePath: %v", err)
+	}
+	os.MkdirAll(filepath.Dir(path), cacheDirPerm)
+	os.WriteFile(path, []byte("not json"), cacheFilePerm)
+
+	fetched := false
+	updaterFetchLatest = func(*http.Client) (string, error) {
+		fetched = true
+		return "v2.0.0", nil
+	}
+
+	if got := CheckForUpdate("v1.0.0"); got != "v2.0.0" {
+		t.Fatalf("CheckForUpdate = %q, want %q", got, "v2.0.0")
+	}
+	if !fetched {
+		t.Fatal("should have fetched because cache is corrupt")
+	}
+}
+
+func TestCheckForUpdateCacheDirError(t *testing.T) {
+	oldCacheDir := updaterUserCacheDir
+	oldFetchLatest := updaterFetchLatest
+	oldTimeNow := updaterTimeNow
+	t.Cleanup(func() {
+		updaterUserCacheDir = oldCacheDir
+		updaterFetchLatest = oldFetchLatest
+		updaterTimeNow = oldTimeNow
+	})
+
+	updaterUserCacheDir = func() (string, error) { return "", errors.New("no cache dir") }
+	updaterTimeNow = time.Now
+
+	fetched := false
+	updaterFetchLatest = func(*http.Client) (string, error) {
+		fetched = true
+		return "v3.0.0", nil
+	}
+
+	// Should still work — just can't read/write cache.
+	if got := CheckForUpdate("v1.0.0"); got != "v3.0.0" {
+		t.Fatalf("CheckForUpdate = %q, want %q", got, "v3.0.0")
+	}
+	if !fetched {
+		t.Fatal("should have fetched when cache dir is unavailable")
+	}
+}
+
+func TestCheckForUpdateNewerLocalVersion(t *testing.T) {
+	stubCache(t)
+	oldFetchLatest := updaterFetchLatest
+	t.Cleanup(func() { updaterFetchLatest = oldFetchLatest })
+
+	updaterFetchLatest = func(*http.Client) (string, error) { return "v1.0.0", nil }
+
+	// Local version is newer than remote — no update.
+	if got := CheckForUpdate("v2.0.0"); got != "" {
+		t.Fatalf("CheckForUpdate = %q, want empty for newer local", got)
+	}
+}
+
+func TestCheckForUpdateCacheWrittenAfterFetch(t *testing.T) {
+	stubCache(t)
+	oldFetchLatest := updaterFetchLatest
+	t.Cleanup(func() { updaterFetchLatest = oldFetchLatest })
+
+	updaterFetchLatest = func(*http.Client) (string, error) { return "v5.0.0", nil }
+
+	CheckForUpdate("v1.0.0")
+
+	// Verify the cache file was written with the correct version.
+	cached := readCache()
+	if cached.LatestVersion != "v5.0.0" {
+		t.Fatalf("cached version = %q, want %q", cached.LatestVersion, "v5.0.0")
+	}
+	if cached.LastCheck.IsZero() {
+		t.Fatal("cached LastCheck is zero, want non-zero")
 	}
 }
 
