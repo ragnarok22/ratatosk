@@ -13,16 +13,33 @@ type tunnelsResponse struct {
 	Tunnels []tunnel.TunnelInfo `json:"tunnels"`
 }
 
-func newAdminHandler(reg tunnelLister) http.Handler {
-	return newAdminHandlerFS(reg, dashboardFS)
+type versionResponse struct {
+	Version       string `json:"version"`
+	LatestVersion string `json:"latest_version,omitempty"`
+	UpdateAvail   bool   `json:"update_available"`
 }
 
-func newAdminHandlerFS(reg tunnelLister, dashboard fs.FS) http.Handler {
+func newAdminHandler(reg tunnelLister) http.Handler {
+	return newAdminHandlerFS(reg, dashboardFS, Version, serverCheckUpdate)
+}
+
+func newAdminHandlerFS(reg tunnelLister, dashboard fs.FS, version string, checkUpdate func(string) string) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/tunnels", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		json.NewEncoder(w).Encode(tunnelsResponse{Tunnels: reg.ListTunnels()})
+	})
+
+	mux.HandleFunc("GET /api/version", func(w http.ResponseWriter, r *http.Request) {
+		latest := checkUpdate(version)
+		resp := versionResponse{
+			Version:       version,
+			LatestVersion: latest,
+			UpdateAvail:   latest != "",
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(resp)
 	})
 
 	// Serve the embedded SPA, or a placeholder if the dist was not built.

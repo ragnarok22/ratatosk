@@ -18,6 +18,7 @@ import (
 	"ratatosk/internal/config"
 	"ratatosk/internal/protocol"
 	"ratatosk/internal/tunnel"
+	"ratatosk/internal/updater"
 )
 
 // tunnelLister is the read-only view used by the admin API.
@@ -43,6 +44,8 @@ type portAllocator interface {
 	Release(port int)
 }
 
+var Version = "dev"
+
 var (
 	registry  tunnelRegistry = tunnel.NewRegistry()
 	cfg       *config.ServerConfig
@@ -62,6 +65,7 @@ var (
 	serverResolveUDPAddr              = net.ResolveUDPAddr
 	serverListenUDP                   = net.ListenUDP
 	mainServeCertmagic                = autocert.SetupAndServe
+	serverCheckUpdate                 = updater.CheckForUpdate
 )
 
 func main() {
@@ -91,6 +95,15 @@ func runMain(
 	}
 
 	portAlloc = tunnel.NewPortAllocator(cfg.PortRangeStart, cfg.PortRangeEnd)
+
+	go func() {
+		if latest := serverCheckUpdate(Version); latest != "" {
+			slog.Warn("a new version of Ratatosk is available",
+				"current", Version,
+				"latest", latest,
+			)
+		}
+	}()
 
 	stop := make(chan struct{})
 

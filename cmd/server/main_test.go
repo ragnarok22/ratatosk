@@ -24,6 +24,8 @@ import (
 	"ratatosk/internal/tunnel"
 )
 
+var noopCheckUpdate = func(string) string { return "" }
+
 type failingReadCloser struct{}
 
 func (failingReadCloser) Read([]byte) (int, error) {
@@ -1240,7 +1242,7 @@ func TestAdminDashboardFallback(t *testing.T) {
 }
 
 func TestAdminDashboardSubErrorFallback(t *testing.T) {
-	handler := newAdminHandlerFS(registry, brokenFS{})
+	handler := newAdminHandlerFS(registry, brokenFS{}, "dev", noopCheckUpdate)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -1261,7 +1263,7 @@ func TestAdminDashboardEmbeddedFS(t *testing.T) {
 		"dashboard/dist/assets/app.css": {Data: []byte("body { color: red; }")},
 		"dashboard/dist/favicon.svg":    {Data: []byte("<svg></svg>")},
 		"dashboard/dist/icons.svg":      {Data: []byte("<svg></svg>")},
-	})
+	}, "dev", noopCheckUpdate)
 
 	t.Run("root", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -1293,7 +1295,7 @@ func TestAdminDashboardEmbeddedFS(t *testing.T) {
 func TestAdminDashboardMissingIndexFallback(t *testing.T) {
 	handler := newAdminHandlerFS(registry, fstest.MapFS{
 		"dashboard/dist/assets/app.js": {Data: []byte("console.log('ok')")},
-	})
+	}, "dev", noopCheckUpdate)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -2535,5 +2537,61 @@ func TestHTTPProxyNoAuthPublicTunnel(t *testing.T) {
 	}
 	if string(body) != "public" {
 		t.Errorf("body = %q, want %q", body, "public")
+	}
+}
+
+func TestAdminAPIVersionUpToDate(t *testing.T) {
+	handler := newAdminHandlerFS(registry, fstest.MapFS{
+		"dashboard/dist/index.html": {Data: []byte("<html></html>")},
+	}, "v1.0.0", func(string) string { return "" })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/version", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var resp versionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Version != "v1.0.0" {
+		t.Fatalf("version = %q, want %q", resp.Version, "v1.0.0")
+	}
+	if resp.UpdateAvail {
+		t.Fatal("update_available = true, want false")
+	}
+	if resp.LatestVersion != "" {
+		t.Fatalf("latest_version = %q, want empty", resp.LatestVersion)
+	}
+}
+
+func TestAdminAPIVersionUpdateAvailable(t *testing.T) {
+	handler := newAdminHandlerFS(registry, fstest.MapFS{
+		"dashboard/dist/index.html": {Data: []byte("<html></html>")},
+	}, "v1.0.0", func(string) string { return "v2.0.0" })
+
+	req := httptest.NewRequest(http.MethodGet, "/api/version", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	if w.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", w.Code)
+	}
+
+	var resp versionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Version != "v1.0.0" {
+		t.Fatalf("version = %q, want %q", resp.Version, "v1.0.0")
+	}
+	if !resp.UpdateAvail {
+		t.Fatal("update_available = false, want true")
+	}
+	if resp.LatestVersion != "v2.0.0" {
+		t.Fatalf("latest_version = %q, want %q", resp.LatestVersion, "v2.0.0")
 	}
 }
