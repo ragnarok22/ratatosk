@@ -69,7 +69,11 @@ The integration monitors a running Ratatosk CLI instance via its inspector API a
 - **Last request** — timestamp of the most recent request
 
 ::: tip
-Run the Ratatosk CLI as a sidecar Docker container on the same network as Home Assistant. Use the container name as the host in the integration config (e.g., `ratatosk:4040`).
+Run the Ratatosk CLI as a sidecar Docker container on the same network as Home Assistant. Start it with `--inspector-host 0.0.0.0` so the inspector API is reachable from other containers, then use the container name as the host in the integration config (e.g., `ratatosk:4040`).
+
+```sh
+ratatosk --port 8123 --server tunnel.example.com:7000 --inspector-host 0.0.0.0
+```
 :::
 
 ### Add-on (HA OS / HA Supervised)

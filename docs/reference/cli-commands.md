@@ -57,7 +57,7 @@ ratatosk udp 27015 --server tunnel.example.com:7000 # Expose game server
 ```
 
 ::: tip
-TCP and UDP tunnels do not support `--basic-auth` or `--streamer` flags. These features are specific to HTTP tunnels.
+TCP and UDP tunnels do not support `--basic-auth`, `--streamer`, or `--inspector-host` flags. These features are specific to HTTP tunnels.
 :::
 
 ## HTTP Flags
