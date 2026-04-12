@@ -184,7 +184,7 @@ If you run Home Assistant, you can install Ratatosk as an add-on to expose your 
 5. Configure the `server` option with your relay server address (e.g., `tunnel.yourdomain.com:7000`)
 6. Start the add-on
 
-See [`home-assistant/ratatosk/DOCS.md`](https://github.com/ragnarok22/ratatosk/blob/main/home-assistant/ratatosk/DOCS.md) for full configuration options.
+See [`ratatosk-tunnel/DOCS.md`](https://github.com/ragnarok22/ratatosk/blob/main/ratatosk-tunnel/DOCS.md) for full configuration options.
 
 ## Advanced / Manual Setup
 

@@ -10,6 +10,7 @@ arch:
 startup: application
 boot: auto
 host_network: true
+init: false
 options:
   server: ""
   port: 8123

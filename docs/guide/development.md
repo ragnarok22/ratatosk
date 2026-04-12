@@ -31,7 +31,7 @@ ratatosk/
 │   └── updater/           # CLI self-update logic
 ├── deploy/                # Systemd unit, Dockerfiles, compose templates, example config
 ├── docs/                  # VitePress documentation site
-├── home-assistant/        # Home Assistant add-on
+├── ratatosk-tunnel/       # Home Assistant add-on
 ├── Makefile
 ├── go.mod
 └── go.sum
