@@ -1,0 +1,36 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Connect to Ratatosk",
+        "description": "Enter the address of your Ratatosk inspector API. The CLI exposes it on port 4040 by default.",
+        "data": {
+          "host": "Host",
+          "port": "Port"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Unable to connect to the Ratatosk inspector. Is the tunnel running?",
+      "unknown": "An unexpected error occurred."
+    },
+    "abort": {
+      "already_configured": "This Ratatosk instance is already configured."
+    }
+  },
+  "entity": {
+    "binary_sensor": {
+      "connected": {
+        "name": "Connected"
+      }
+    },
+    "sensor": {
+      "request_count": {
+        "name": "Request count"
+      },
+      "last_request": {
+        "name": "Last request"
+      }
+    }
+  }
+}

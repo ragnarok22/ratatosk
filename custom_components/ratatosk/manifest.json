@@ -1,0 +1,12 @@
+{
+  "domain": "ratatosk",
+  "name": "Ratatosk",
+  "codeowners": ["@ragnarok22"],
+  "config_flow": true,
+  "documentation": "https://ragnarok22.github.io/ratatosk/guide/homelab",
+  "integration_type": "service",
+  "iot_class": "local_polling",
+  "issue_tracker": "https://github.com/ragnarok22/ratatosk/issues",
+  "requirements": [],
+  "version": "0.1.0"
+}

@@ -173,18 +173,14 @@ The client uses `network_mode: host` on Linux so it can reach local services. On
 docker compose -f full-stack.docker-compose.yml up --build
 ```
 
-## Home Assistant Add-on
+## Home Assistant
 
-If you run Home Assistant, you can install Ratatosk as an add-on to expose your dashboard without port forwarding.
+Ratatosk integrates with Home Assistant in two ways:
 
-1. In Home Assistant, go to **Settings > Add-ons > Add-on Store**
-2. Click the menu (top right) and select **Repositories**
-3. Add: `https://github.com/ragnarok22/ratatosk`
-4. Install "Ratatosk Tunnel" from the store
-5. Configure the `server` option with your relay server address (e.g., `tunnel.yourdomain.com:7000`)
-6. Start the add-on
+- **HACS Integration** — for HA Container (Docker) and HA Core. Monitors a running Ratatosk instance and exposes tunnel status as HA entities.
+- **Supervisor Add-on** — for HA OS and HA Supervised. Runs the tunnel client directly as an add-on.
 
-See [`ratatosk-tunnel/DOCS.md`](https://github.com/ragnarok22/ratatosk/blob/main/ratatosk-tunnel/DOCS.md) for full configuration options.
+See the [Homelab & Smart Home](./homelab.md#home-assistant) guide for full setup instructions.
 
 ## Advanced / Manual Setup
 
