@@ -26,6 +26,20 @@ import (
 
 var noopCheckUpdate = func(string) string { return "" }
 
+// freePort finds an available TCP port by binding to :0 and returning
+// the port the OS assigned. This avoids hardcoded ports that may be
+// occupied in CI.
+func freePort(t *testing.T) int {
+	t.Helper()
+	ln, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("could not find free port: %v", err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close()
+	return port
+}
+
 type failingReadCloser struct{}
 
 func (failingReadCloser) Read([]byte) (int, error) {
@@ -2227,7 +2241,8 @@ func TestHandleHTTPTunnelWriteResponseErrorUnregistersTunnel(t *testing.T) {
 
 func TestHandleTCPTunnelAllocationFailure(t *testing.T) {
 	oldAlloc := portAlloc
-	portAlloc = tunnel.NewPortAllocator(35010, 35011)
+	p := freePort(t)
+	portAlloc = tunnel.NewPortAllocator(p, p+1)
 	if _, err := portAlloc.Allocate(); err != nil {
 		t.Fatalf("Allocate: %v", err)
 	}
@@ -2263,7 +2278,8 @@ func TestHandleTCPTunnelAllocationFailure(t *testing.T) {
 func TestHandleTCPTunnelListenFailure(t *testing.T) {
 	oldAlloc := portAlloc
 	oldListenTCP := serverListenTCP
-	portAlloc = tunnel.NewPortAllocator(35011, 35012)
+	p := freePort(t)
+	portAlloc = tunnel.NewPortAllocator(p, p+1)
 	serverListenTCP = func(network, address string) (net.Listener, error) {
 		return nil, errors.New("listen failed")
 	}
@@ -2303,7 +2319,8 @@ func TestHandleTCPTunnelWriteResponseErrorClosesListener(t *testing.T) {
 	oldAlloc := portAlloc
 	oldRegistry := registry
 	oldListenTCP := serverListenTCP
-	portAlloc = tunnel.NewPortAllocator(35012, 35013)
+	p := freePort(t)
+	portAlloc = tunnel.NewPortAllocator(p, p+1)
 	registry = tunnel.NewRegistry()
 	serverListenTCP = net.Listen
 	t.Cleanup(func() {
@@ -2317,14 +2334,14 @@ func TestHandleTCPTunnelWriteResponseErrorClosesListener(t *testing.T) {
 
 	handleTCPTunnel(nil, serverConn, &protocol.TunnelRequest{LocalPort: 22}, "remote")
 
-	if _, ok := registry.GetPortEntry(35012); ok {
+	if _, ok := registry.GetPortEntry(p); ok {
 		t.Fatal("port remained registered after response write failure")
 	}
-	if got, err := portAlloc.Allocate(); err != nil || got != 35012 {
-		t.Fatalf("Allocate() = (%d, %v), want (35012, nil)", got, err)
+	if got, err := portAlloc.Allocate(); err != nil || got != p {
+		t.Fatalf("Allocate() = (%d, %v), want (%d, nil)", got, err, p)
 	}
 
-	ln, err := net.Listen("tcp", ":35012")
+	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", p))
 	if err != nil {
 		t.Fatalf("listener was not closed: %v", err)
 	}
@@ -2333,7 +2350,8 @@ func TestHandleTCPTunnelWriteResponseErrorClosesListener(t *testing.T) {
 
 func TestHandleUDPTunnelAllocationFailure(t *testing.T) {
 	oldAlloc := portAlloc
-	portAlloc = tunnel.NewPortAllocator(35020, 35021)
+	p := freePort(t)
+	portAlloc = tunnel.NewPortAllocator(p, p+1)
 	if _, err := portAlloc.Allocate(); err != nil {
 		t.Fatalf("Allocate: %v", err)
 	}
@@ -2369,7 +2387,8 @@ func TestHandleUDPTunnelAllocationFailure(t *testing.T) {
 func TestHandleUDPTunnelResolveFailure(t *testing.T) {
 	oldAlloc := portAlloc
 	oldResolveUDPAddr := serverResolveUDPAddr
-	portAlloc = tunnel.NewPortAllocator(35021, 35022)
+	p := freePort(t)
+	portAlloc = tunnel.NewPortAllocator(p, p+1)
 	serverResolveUDPAddr = func(network, address string) (*net.UDPAddr, error) {
 		return nil, errors.New("resolve failed")
 	}
@@ -2409,7 +2428,8 @@ func TestHandleUDPTunnelListenFailure(t *testing.T) {
 	oldAlloc := portAlloc
 	oldResolveUDPAddr := serverResolveUDPAddr
 	oldListenUDP := serverListenUDP
-	portAlloc = tunnel.NewPortAllocator(35022, 35023)
+	p := freePort(t)
+	portAlloc = tunnel.NewPortAllocator(p, p+1)
 	serverResolveUDPAddr = net.ResolveUDPAddr
 	serverListenUDP = net.ListenUDP
 	t.Cleanup(func() {
@@ -2418,7 +2438,7 @@ func TestHandleUDPTunnelListenFailure(t *testing.T) {
 		serverListenUDP = oldListenUDP
 	})
 
-	busy, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 35022})
+	busy, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: p})
 	if err != nil {
 		t.Fatalf("ListenUDP: %v", err)
 	}
@@ -2440,8 +2460,9 @@ func TestHandleUDPTunnelListenFailure(t *testing.T) {
 	if resp.Success {
 		t.Fatal("expected listen failure")
 	}
-	if !strings.Contains(resp.Error, "failed to listen on UDP port 35022") {
-		t.Fatalf("error = %q, want listen failure", resp.Error)
+	wantErr := fmt.Sprintf("failed to listen on UDP port %d", p)
+	if !strings.Contains(resp.Error, wantErr) {
+		t.Fatalf("error = %q, want %q", resp.Error, wantErr)
 	}
 
 	select {
@@ -2456,7 +2477,8 @@ func TestHandleUDPTunnelWriteResponseErrorClosesSocket(t *testing.T) {
 	oldRegistry := registry
 	oldResolveUDPAddr := serverResolveUDPAddr
 	oldListenUDP := serverListenUDP
-	portAlloc = tunnel.NewPortAllocator(35023, 35024)
+	p := freePort(t)
+	portAlloc = tunnel.NewPortAllocator(p, p+1)
 	registry = tunnel.NewRegistry()
 	serverResolveUDPAddr = net.ResolveUDPAddr
 	serverListenUDP = net.ListenUDP
@@ -2472,14 +2494,14 @@ func TestHandleUDPTunnelWriteResponseErrorClosesSocket(t *testing.T) {
 
 	handleUDPTunnel(nil, serverConn, &protocol.TunnelRequest{LocalPort: 25565}, "remote")
 
-	if _, ok := registry.GetPortEntry(35023); ok {
+	if _, ok := registry.GetPortEntry(p); ok {
 		t.Fatal("port remained registered after response write failure")
 	}
-	if got, err := portAlloc.Allocate(); err != nil || got != 35023 {
-		t.Fatalf("Allocate() = (%d, %v), want (35023, nil)", got, err)
+	if got, err := portAlloc.Allocate(); err != nil || got != p {
+		t.Fatalf("Allocate() = (%d, %v), want (%d, nil)", got, err, p)
 	}
 
-	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 35023})
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: p})
 	if err != nil {
 		t.Fatalf("UDP socket was not closed: %v", err)
 	}
