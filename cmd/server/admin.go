@@ -13,11 +13,11 @@ type tunnelsResponse struct {
 	Tunnels []tunnel.TunnelInfo `json:"tunnels"`
 }
 
-func newAdminHandler(reg *tunnel.Registry) http.Handler {
+func newAdminHandler(reg tunnelLister) http.Handler {
 	return newAdminHandlerFS(reg, dashboardFS)
 }
 
-func newAdminHandlerFS(reg *tunnel.Registry, dashboard fs.FS) http.Handler {
+func newAdminHandlerFS(reg tunnelLister, dashboard fs.FS) http.Handler {
 	mux := http.NewServeMux()
 
 	mux.HandleFunc("GET /api/tunnels", func(w http.ResponseWriter, r *http.Request) {

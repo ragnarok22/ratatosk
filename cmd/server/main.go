@@ -20,10 +20,33 @@ import (
 	"ratatosk/internal/tunnel"
 )
 
+// tunnelLister is the read-only view used by the admin API.
+type tunnelLister interface {
+	ListTunnels() []tunnel.TunnelInfo
+}
+
+// tunnelRegistry manages tunnel lifecycle for HTTP/TCP/UDP handlers.
+type tunnelRegistry interface {
+	tunnelLister
+	Register(subdomain string, session *yamux.Session, basicAuth string, protocol string)
+	Unregister(subdomain string)
+	HasSubdomain(subdomain string) bool
+	GetEntry(subdomain string) (*tunnel.TunnelEntry, bool)
+	RegisterPort(port int, entry *tunnel.TunnelEntry)
+	UnregisterPort(port int)
+	GetPortEntry(port int) (*tunnel.TunnelEntry, bool)
+}
+
+// portAllocator abstracts port allocation for TCP/UDP tunnel handlers.
+type portAllocator interface {
+	Allocate() (int, error)
+	Release(port int)
+}
+
 var (
-	registry  = tunnel.NewRegistry()
+	registry  tunnelRegistry = tunnel.NewRegistry()
 	cfg       *config.ServerConfig
-	portAlloc *tunnel.PortAllocator
+	portAlloc portAllocator
 
 	mainStdout              io.Writer = os.Stdout
 	mainExit                          = os.Exit
