@@ -14,12 +14,13 @@ var fallbackPorts = []int{4040, 5050, 6060, 7070, 8080, 0}
 
 // StartServer starts the inspector web UI on the first available port.
 // It returns the bound address (e.g. "127.0.0.1:4040") or an error if
-// no port could be bound.
-func StartServer(logger *Logger) (string, error) {
+// no port could be bound. The host parameter controls which interface to
+// bind to (e.g. "127.0.0.1" for localhost only, "0.0.0.0" for all interfaces).
+func StartServer(logger *Logger, host string) (string, error) {
 	var ln net.Listener
 	var err error
 	for _, port := range fallbackPorts {
-		addr := fmt.Sprintf("127.0.0.1:%d", port)
+		addr := fmt.Sprintf("%s:%d", host, port)
 		ln, err = net.Listen("tcp", addr)
 		if err == nil {
 			break

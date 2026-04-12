@@ -32,6 +32,7 @@ var (
 	cliRunClient                = runClient
 	cliRunRawClient             = runRawClient
 	cliStartInspector           = inspector.StartServer
+	cliInspectorHost            = "127.0.0.1"
 	cliResolveUDPAddr           = net.ResolveUDPAddr
 	cliDialUDP                  = net.DialUDP
 )
@@ -93,6 +94,7 @@ func runHTTPCommand(
 	port := flags.Int("port", 3000, "local port to expose")
 	streamer := flags.Bool("streamer", false, "redact sensitive data from output for streaming")
 	basicAuth := flags.String("basic-auth", "", "require basic auth for tunnel visitors (format: user:pass)")
+	inspectorHost := flags.String("inspector-host", "127.0.0.1", "bind address for the inspector web UI (use 0.0.0.0 for all interfaces)")
 	if err := flags.Parse(args[1:]); err != nil {
 		return 2
 	}
@@ -107,6 +109,7 @@ func runHTTPCommand(
 	}
 
 	redact.Enabled = *streamer
+	cliInspectorHost = *inspectorHost
 	slog.SetDefault(slog.New(redact.NewHandler(slog.NewTextHandler(stdout, nil))))
 
 	if err := runClientFn(*server, *port, *basicAuth); err != nil {
@@ -295,7 +298,7 @@ func runClient(serverAddr string, localPort int, basicAuth string) error {
 	defer session.Close()
 
 	logger := inspector.NewLogger()
-	inspectorAddr, inspectorErr := cliStartInspector(logger)
+	inspectorAddr, inspectorErr := cliStartInspector(logger, cliInspectorHost)
 
 	tunnelURL := resp.URL
 	if tunnelURL == "" {

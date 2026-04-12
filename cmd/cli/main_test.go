@@ -662,7 +662,7 @@ func TestRunClientUsesFallbackURLWhenResponseURLMissing(t *testing.T) {
 		os.Stdout = oldStdout
 	})
 
-	cliStartInspector = func(*inspector.Logger) (string, error) {
+	cliStartInspector = func(*inspector.Logger, string) (string, error) {
 		return "", errors.New("inspector unavailable")
 	}
 

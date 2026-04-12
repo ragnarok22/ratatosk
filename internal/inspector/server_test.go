@@ -14,7 +14,7 @@ import (
 
 func TestStartServer(t *testing.T) {
 	logger := NewLogger()
-	addr, err := StartServer(logger)
+	addr, err := StartServer(logger, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("StartServer failed: %v", err)
 	}
@@ -68,7 +68,7 @@ func TestStartServerPortFallback(t *testing.T) {
 	defer ln.Close()
 
 	logger := NewLogger()
-	addr, err := StartServer(logger)
+	addr, err := StartServer(logger, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("StartServer failed with port %d occupied: %v", first, err)
 	}
@@ -105,7 +105,7 @@ func TestStartServerAllPortsBusy(t *testing.T) {
 	})
 
 	logger := NewLogger()
-	_, err := StartServer(logger)
+	_, err := StartServer(logger, "127.0.0.1")
 	if err == nil {
 		t.Fatal("expected error when all ports are busy")
 	}
@@ -116,7 +116,7 @@ func TestAPILogsAfterTraffic(t *testing.T) {
 	logger.Add(TrafficLog{Method: "POST", Path: "/data", RespStatus: 201})
 	logger.Add(TrafficLog{Method: "GET", Path: "/data", RespStatus: 200})
 
-	addr, err := StartServer(logger)
+	addr, err := StartServer(logger, "127.0.0.1")
 	if err != nil {
 		t.Skipf("StartServer failed (ports busy): %v", err)
 	}
@@ -159,7 +159,7 @@ func TestAPILogsRedacted(t *testing.T) {
 		RespStatus: 200,
 	})
 
-	addr, err := StartServer(logger)
+	addr, err := StartServer(logger, "127.0.0.1")
 	if err != nil {
 		t.Skipf("StartServer failed (ports busy): %v", err)
 	}
