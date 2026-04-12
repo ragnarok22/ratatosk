@@ -1426,3 +1426,80 @@ func TestHandleUDPStreamDialError(t *testing.T) {
 		t.Fatal("handleUDPStream did not return on dial failure")
 	}
 }
+
+func TestNotifyUpdatePrintsWhenAvailable(t *testing.T) {
+	oldCheckUpdate := cliCheckUpdate
+	t.Cleanup(func() { cliCheckUpdate = oldCheckUpdate })
+
+	cliCheckUpdate = func(string) string { return "v2.0.0" }
+
+	var buf bytes.Buffer
+	notifyUpdate(&buf, "v1.0.0")
+
+	if !strings.Contains(buf.String(), "v2.0.0") {
+		t.Fatalf("output = %q, want update notice", buf.String())
+	}
+	if !strings.Contains(buf.String(), "ratatosk self-update") {
+		t.Fatalf("output = %q, want self-update hint", buf.String())
+	}
+}
+
+func TestNotifyUpdateSilentWhenUpToDate(t *testing.T) {
+	oldCheckUpdate := cliCheckUpdate
+	t.Cleanup(func() { cliCheckUpdate = oldCheckUpdate })
+
+	cliCheckUpdate = func(string) string { return "" }
+
+	var buf bytes.Buffer
+	notifyUpdate(&buf, "v1.0.0")
+
+	if buf.Len() != 0 {
+		t.Fatalf("output = %q, want empty", buf.String())
+	}
+}
+
+func TestRunVersionDoesNotCheckUpdate(t *testing.T) {
+	oldCheckUpdate := cliCheckUpdate
+	t.Cleanup(func() { cliCheckUpdate = oldCheckUpdate })
+
+	cliCheckUpdate = func(string) string {
+		t.Fatal("CheckForUpdate should not be called for version command")
+		return ""
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run(
+		[]string{"ratatosk", "version"},
+		func(string) string { return "" },
+		&stdout, &stderr,
+		func(string) error { return nil },
+		func(string, int, string) error { return nil },
+		noopRawClient,
+	)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0", code)
+	}
+}
+
+func TestRunSelfUpdateDoesNotCheckUpdate(t *testing.T) {
+	oldCheckUpdate := cliCheckUpdate
+	t.Cleanup(func() { cliCheckUpdate = oldCheckUpdate })
+
+	cliCheckUpdate = func(string) string {
+		t.Fatal("CheckForUpdate should not be called for self-update command")
+		return ""
+	}
+
+	var stdout, stderr bytes.Buffer
+	code := run(
+		[]string{"ratatosk", "self-update"},
+		func(string) string { return "" },
+		&stdout, &stderr,
+		func(string) error { return nil },
+		func(string, int, string) error { return nil },
+		noopRawClient,
+	)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0", code)
+	}
+}

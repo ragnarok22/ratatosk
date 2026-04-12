@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/minio/selfupdate"
 )
@@ -193,4 +194,113 @@ func UpdateCLI(currentVersion string) error {
 
 	fmt.Printf("Updated from %s to %s.\n", currentVersion, latest)
 	return nil
+}
+
+const (
+	// checkInterval is the minimum time between remote update checks.
+	checkInterval = 8 * time.Hour
+	// updateCheckTimeout is the HTTP timeout for the background version check.
+	updateCheckTimeout = 3 * time.Second
+	// cacheDirPerm is the permission mode for the cache directory.
+	cacheDirPerm = 0o755
+	// cacheFilePerm is the permission mode for the cache file.
+	cacheFilePerm = 0o644
+)
+
+// updateCache is the on-disk format for the update check cache.
+type updateCache struct {
+	LastCheck     time.Time `json:"last_check"`
+	LatestVersion string    `json:"latest_version"`
+}
+
+var (
+	updaterUserCacheDir = os.UserCacheDir
+	updaterTimeNow      = time.Now
+)
+
+// cacheFilePath returns the path to the update check cache file.
+func cacheFilePath() (string, error) {
+	dir, err := updaterUserCacheDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(dir, "ratatosk", "update-check.json"), nil
+}
+
+// readCache loads the cached update check result. Returns a zero-value
+// cache if the file is missing or unreadable.
+func readCache() updateCache {
+	path, err := cacheFilePath()
+	if err != nil {
+		return updateCache{}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return updateCache{}
+	}
+	var c updateCache
+	if json.Unmarshal(data, &c) != nil {
+		return updateCache{}
+	}
+	return c
+}
+
+// writeCache persists the update check result to disk.
+func writeCache(c updateCache) {
+	path, err := cacheFilePath()
+	if err != nil {
+		return
+	}
+	if err := os.MkdirAll(filepath.Dir(path), cacheDirPerm); err != nil {
+		return
+	}
+	data, err := json.Marshal(c)
+	if err != nil {
+		return
+	}
+	_ = os.WriteFile(path, data, cacheFilePerm)
+}
+
+// CheckForUpdate checks if a newer version is available on GitHub.
+// Results are cached for 24 hours to avoid hitting the API on every
+// invocation. Returns the latest version tag if an update is available,
+// or an empty string if the current version is up to date or cannot be
+// determined.
+func CheckForUpdate(currentVersion string) string {
+	if currentVersion == "dev" {
+		return ""
+	}
+
+	now := updaterTimeNow()
+	cached := readCache()
+	if !cached.LastCheck.IsZero() && now.Sub(cached.LastCheck) < checkInterval {
+		if cached.LatestVersion == "" {
+			return ""
+		}
+		cmp, err := compareVersions(currentVersion, cached.LatestVersion)
+		if err != nil {
+			return ""
+		}
+		if cmp < 0 {
+			return cached.LatestVersion
+		}
+		return ""
+	}
+
+	client := &http.Client{Timeout: updateCheckTimeout}
+	latest, err := updaterFetchLatest(client)
+	if err != nil {
+		return ""
+	}
+
+	writeCache(updateCache{LastCheck: now, LatestVersion: latest})
+
+	cmp, err := compareVersions(currentVersion, latest)
+	if err != nil {
+		return ""
+	}
+	if cmp < 0 {
+		return latest
+	}
+	return ""
 }

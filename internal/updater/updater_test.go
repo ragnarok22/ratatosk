@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestCompareVersions(t *testing.T) {
@@ -172,6 +173,156 @@ func stubTransport(t *testing.T, srv *httptest.Server) func() {
 		return orig.RoundTrip(req2)
 	})
 	return func() { http.DefaultTransport = orig }
+}
+
+// stubCache points the cache directory at a temp dir and returns a
+// restore function. Tests that call CheckForUpdate must use this to
+// avoid polluting the real user cache.
+func stubCache(t *testing.T) {
+	t.Helper()
+	oldCacheDir := updaterUserCacheDir
+	oldTimeNow := updaterTimeNow
+	t.Cleanup(func() {
+		updaterUserCacheDir = oldCacheDir
+		updaterTimeNow = oldTimeNow
+	})
+	dir := t.TempDir()
+	updaterUserCacheDir = func() (string, error) { return dir, nil }
+	updaterTimeNow = time.Now
+}
+
+func TestCheckForUpdateDevBuild(t *testing.T) {
+	if got := CheckForUpdate("dev"); got != "" {
+		t.Fatalf("CheckForUpdate(\"dev\") = %q, want empty", got)
+	}
+}
+
+func TestCheckForUpdateUpToDate(t *testing.T) {
+	stubCache(t)
+	oldFetchLatest := updaterFetchLatest
+	t.Cleanup(func() { updaterFetchLatest = oldFetchLatest })
+
+	updaterFetchLatest = func(*http.Client) (string, error) { return "v1.0.0", nil }
+
+	if got := CheckForUpdate("v1.0.0"); got != "" {
+		t.Fatalf("CheckForUpdate = %q, want empty", got)
+	}
+}
+
+func TestCheckForUpdateAvailable(t *testing.T) {
+	stubCache(t)
+	oldFetchLatest := updaterFetchLatest
+	t.Cleanup(func() { updaterFetchLatest = oldFetchLatest })
+
+	updaterFetchLatest = func(*http.Client) (string, error) { return "v2.0.0", nil }
+
+	if got := CheckForUpdate("v1.0.0"); got != "v2.0.0" {
+		t.Fatalf("CheckForUpdate = %q, want %q", got, "v2.0.0")
+	}
+}
+
+func TestCheckForUpdateFetchError(t *testing.T) {
+	stubCache(t)
+	oldFetchLatest := updaterFetchLatest
+	t.Cleanup(func() { updaterFetchLatest = oldFetchLatest })
+
+	updaterFetchLatest = func(*http.Client) (string, error) { return "", errors.New("network error") }
+
+	if got := CheckForUpdate("v1.0.0"); got != "" {
+		t.Fatalf("CheckForUpdate = %q, want empty on error", got)
+	}
+}
+
+func TestCheckForUpdateBadRemoteVersion(t *testing.T) {
+	stubCache(t)
+	oldFetchLatest := updaterFetchLatest
+	t.Cleanup(func() { updaterFetchLatest = oldFetchLatest })
+
+	updaterFetchLatest = func(*http.Client) (string, error) { return "not-a-version", nil }
+
+	if got := CheckForUpdate("v1.0.0"); got != "" {
+		t.Fatalf("CheckForUpdate = %q, want empty for bad version", got)
+	}
+}
+
+func TestCheckForUpdateUsesCache(t *testing.T) {
+	stubCache(t)
+	oldFetchLatest := updaterFetchLatest
+	t.Cleanup(func() { updaterFetchLatest = oldFetchLatest })
+
+	fetchCount := 0
+	updaterFetchLatest = func(*http.Client) (string, error) {
+		fetchCount++
+		return "v2.0.0", nil
+	}
+
+	// First call should hit the network and cache.
+	if got := CheckForUpdate("v1.0.0"); got != "v2.0.0" {
+		t.Fatalf("first call = %q, want %q", got, "v2.0.0")
+	}
+	if fetchCount != 1 {
+		t.Fatalf("fetchCount = %d, want 1", fetchCount)
+	}
+
+	// Second call within the interval should use cache.
+	if got := CheckForUpdate("v1.0.0"); got != "v2.0.0" {
+		t.Fatalf("second call = %q, want %q", got, "v2.0.0")
+	}
+	if fetchCount != 1 {
+		t.Fatalf("fetchCount = %d, want 1 (should use cache)", fetchCount)
+	}
+}
+
+func TestCheckForUpdateCacheExpired(t *testing.T) {
+	stubCache(t)
+	oldFetchLatest := updaterFetchLatest
+	t.Cleanup(func() { updaterFetchLatest = oldFetchLatest })
+
+	fetchCount := 0
+	updaterFetchLatest = func(*http.Client) (string, error) {
+		fetchCount++
+		return "v2.0.0", nil
+	}
+
+	// First call — populates cache.
+	CheckForUpdate("v1.0.0")
+	if fetchCount != 1 {
+		t.Fatalf("fetchCount = %d, want 1", fetchCount)
+	}
+
+	// Advance time past the check interval.
+	updaterTimeNow = func() time.Time { return time.Now().Add(checkInterval + time.Minute) }
+
+	// Should fetch again because the cache is stale.
+	if got := CheckForUpdate("v1.0.0"); got != "v2.0.0" {
+		t.Fatalf("after expiry = %q, want %q", got, "v2.0.0")
+	}
+	if fetchCount != 2 {
+		t.Fatalf("fetchCount = %d, want 2", fetchCount)
+	}
+}
+
+func TestCheckForUpdateCacheUpToDate(t *testing.T) {
+	stubCache(t)
+	oldFetchLatest := updaterFetchLatest
+	t.Cleanup(func() { updaterFetchLatest = oldFetchLatest })
+
+	updaterFetchLatest = func(*http.Client) (string, error) { return "v1.0.0", nil }
+
+	// First call populates cache with same version.
+	if got := CheckForUpdate("v1.0.0"); got != "" {
+		t.Fatalf("first call = %q, want empty", got)
+	}
+
+	// Second call from cache should still return empty.
+	updaterFetchLatest = func(*http.Client) (string, error) {
+		t.Fatal("should not fetch when cache is fresh")
+		return "", nil
+	}
+
+	if got := CheckForUpdate("v1.0.0"); got != "" {
+		t.Fatalf("cached call = %q, want empty", got)
+	}
 }
 
 func TestUpdateCLIDevBuild(t *testing.T) {

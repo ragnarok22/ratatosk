@@ -28,6 +28,7 @@ var (
 	cliStderr         io.Writer = os.Stderr
 	cliExit                     = os.Exit
 	cliUpdateCLI                = updater.UpdateCLI
+	cliCheckUpdate              = updater.CheckForUpdate
 	cliRunClient                = runClient
 	cliRunRawClient             = runRawClient
 	cliStartInspector           = inspector.StartServer
@@ -61,13 +62,22 @@ func run(
 			}
 			return 0
 		case "tcp":
+			go notifyUpdate(stdout, Version)
 			return runTCPCommand(args[2:], getenv, stdout, stderr, runRawClientFn)
 		case "udp":
+			go notifyUpdate(stdout, Version)
 			return runUDPCommand(args[2:], getenv, stdout, stderr, runRawClientFn)
 		}
 	}
 
+	go notifyUpdate(stdout, Version)
 	return runHTTPCommand(args, getenv, stdout, stderr, runClientFn)
+}
+
+func notifyUpdate(w io.Writer, currentVersion string) {
+	if latest := cliCheckUpdate(currentVersion); latest != "" {
+		fmt.Fprintf(w, "\nA new version of Ratatosk is available (%s). Run \"ratatosk self-update\" to upgrade.\n", latest)
+	}
 }
 
 func runHTTPCommand(
