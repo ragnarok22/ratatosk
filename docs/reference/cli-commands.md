@@ -16,6 +16,10 @@ ratatosk [command] [flags]
 | `ratatosk tcp <port>` | Expose a local TCP service (e.g., SSH, PostgreSQL) |
 | `ratatosk udp <port>` | Expose a local UDP service (e.g., game servers) |
 | `ratatosk --server host:port` | Connect to a specific relay server (default: `localhost:7000`) |
+| `ratatosk --token <token>` | Authenticate to the relay control plane |
+| `ratatosk --tls` | Enable verified TLS for the relay control plane |
+| `ratatosk --ca <path>` | Add a custom CA for control-plane TLS |
+| `ratatosk --server-name <name>` | Override the control TLS certificate name |
 | `ratatosk --basic-auth user:pass` | Require HTTP Basic Auth for tunnel visitors |
 | `ratatosk --streamer` | Enable streamer mode (redact sensitive data from output) |
 | `ratatosk --inspector-host 0.0.0.0` | Bind the inspector UI to all interfaces (for Docker) |
@@ -75,6 +79,17 @@ ratatosk --server tunnel.example.com:7000 --port 3000
 ```
 
 When pointing at a remote relay server (e.g., deployed on a VPS), this flag is required. The environment variable is useful for Docker and Home Assistant deployments where flags may not be convenient.
+
+### Control-Plane Security
+
+Remote relay servers require a pre-shared token and verified TLS:
+
+```sh
+ratatosk --server tunnel.example.com:7000 --port 3000 \
+  --token "$RATATOSK_CONTROL_TOKEN" --tls
+```
+
+Use `--ca /path/to/ca.pem` for a private CA and `--server-name tunnel.example.com` when the dial address differs from the certificate name. The equivalent environment variables are `RATATOSK_CONTROL_TOKEN`, `RATATOSK_CONTROL_TLS_ENABLED`, `RATATOSK_CONTROL_CA_FILE`, and `RATATOSK_CONTROL_SERVER_NAME`. These flags also work with `tcp` and `udp` subcommands.
 
 ### `--port`
 

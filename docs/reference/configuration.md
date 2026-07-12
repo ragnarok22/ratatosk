@@ -21,8 +21,19 @@ cp deploy/ratatosk.yaml.example /etc/ratatosk/ratatosk.yaml
 ```yaml
 base_domain: localhost       # Tunnels are <subdomain>.<base_domain>
 public_port: 8080            # Public HTTP(S) proxy port
+admin_host: 127.0.0.1        # Safe local-only dashboard bind
 admin_port: 8081             # Admin dashboard port
+admin_username: ""           # Required with password for remote admin binds
+admin_password: ""
+admin_tls_enabled: false     # Required for remote admin binds
+admin_tls_cert_file: ""     # Admin server certificate (PEM)
+admin_tls_key_file: ""      # Admin private key (PEM)
+control_host: 127.0.0.1      # Safe local-only control-plane bind
 control_port: 7000           # TCP control plane port
+control_token: ""            # Required for remote control-plane binds
+control_tls_enabled: false   # Required for remote control-plane binds
+control_tls_cert_file: ""    # Control-plane server certificate (PEM)
+control_tls_key_file: ""     # Control-plane private key (PEM)
 tls_enabled: false           # Enable manual TLS on the public proxy
 tls_cert_file: ""            # Path to TLS certificate (PEM)
 tls_key_file: ""             # Path to TLS private key (PEM)
@@ -43,7 +54,18 @@ Every option can be set via environment variables with the `RATATOSK_` prefix. E
 | `RATATOSK_BASE_DOMAIN` | `localhost` | Base domain for tunnel subdomains |
 | `RATATOSK_PUBLIC_PORT` | `8080` | Public HTTP(S) proxy port |
 | `RATATOSK_ADMIN_PORT` | `8081` | Admin dashboard port |
+| `RATATOSK_ADMIN_HOST` | `127.0.0.1` | Admin dashboard bind address |
+| `RATATOSK_ADMIN_USERNAME` | | Browser Basic Auth username |
+| `RATATOSK_ADMIN_PASSWORD` | | Browser Basic Auth password |
+| `RATATOSK_ADMIN_TLS_ENABLED` | `false` | Enable admin TLS; required for non-loopback binds |
+| `RATATOSK_ADMIN_TLS_CERT_FILE` | | Admin TLS certificate path |
+| `RATATOSK_ADMIN_TLS_KEY_FILE` | | Admin TLS private-key path |
 | `RATATOSK_CONTROL_PORT` | `7000` | TCP control plane port |
+| `RATATOSK_CONTROL_HOST` | `127.0.0.1` | Control-plane bind address |
+| `RATATOSK_CONTROL_TOKEN` | | Pre-shared control-plane token |
+| `RATATOSK_CONTROL_TLS_ENABLED` | `false` | Enable control-plane TLS |
+| `RATATOSK_CONTROL_TLS_CERT_FILE` | | Control-plane certificate path |
+| `RATATOSK_CONTROL_TLS_KEY_FILE` | | Control-plane private key path |
 | `RATATOSK_TLS_ENABLED` | `false` | Enable manual TLS on the public proxy |
 | `RATATOSK_TLS_CERT_FILE` | | Path to TLS certificate (PEM) |
 | `RATATOSK_TLS_KEY_FILE` | | Path to TLS private key (PEM) |
@@ -64,6 +86,16 @@ Every option can be set via environment variables with the `RATATOSK_` prefix. E
 | `10000-20000` | Dynamic port range for TCP/UDP tunnels |
 
 The TCP/UDP port range is configurable via `port_range_start` and `port_range_end`. When a client requests a TCP or UDP tunnel, the server randomly allocates a port from this range. Make sure these ports are open in your firewall if you use TCP/UDP tunnels.
+
+## Control-Plane And Admin Security
+
+The default admin and control listeners bind to `127.0.0.1` and can run without credentials for local development. Ratatosk rejects unsafe remote configurations:
+
+- A non-loopback `admin_host` requires both `admin_username` and `admin_password`.
+- A non-loopback `control_host` requires `control_token`, `control_tls_enabled`, and a valid control TLS certificate/key pair.
+- CLI clients connecting remotely must provide the same token and verify the server certificate. Ratatosk does not support disabling certificate verification.
+
+The control certificate must contain the hostname used by CLI clients. It can be the same PEM certificate used for manual public TLS when that certificate covers both names.
 
 ## TLS Configuration
 

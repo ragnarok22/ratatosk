@@ -48,10 +48,12 @@ The relay server accepts CLI client connections and routes public HTTP traffic t
 
 ### Docker (Recommended)
 
+Use the secured Compose template, which requires admin credentials, a control-plane token, and control TLS certificate paths before exposing remote listeners:
+
 ```sh
-docker run -d --name ratatosk \
-  -p 7000:7000 -p 8080:8080 -p 8081:8081 \
-  ghcr.io/ragnarok22/ratatosk-server
+cd deploy/compose
+cp .env.example .env
+docker compose -f server.docker-compose.yml up -d
 ```
 
 To pass a config file:
@@ -59,7 +61,7 @@ To pass a config file:
 ```sh
 docker run -d --name ratatosk \
   -v /path/to/ratatosk.yaml:/etc/ratatosk/ratatosk.yaml:ro \
-  -p 7000:7000 -p 443:443 -p 8081:8081 \
+  -p 7000:7000 -p 443:443 -p 127.0.0.1:8081:8081 \
   ghcr.io/ragnarok22/ratatosk-server
 ```
 

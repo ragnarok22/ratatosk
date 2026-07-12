@@ -90,10 +90,15 @@ On first startup with automatic TLS, certificate provisioning may take 30–60 s
 
 ### 5. Connect Your First Tunnel
 
-From your local machine, install the CLI and connect:
+The setup wizard keeps the control listener on loopback. Before accepting
+remote clients, provision a certificate valid for the relay hostname, then set
+`control_host: 0.0.0.0`, a long random `control_token`, and the
+`control_tls_*` certificate paths described in the manual configuration below.
+
+From your local machine, install the CLI and connect with the matching token:
 
 ```sh
-ratatosk --port 3000
+ratatosk --server tunnel.yourdomain.com:7000 --token "$RATATOSK_CONTROL_TOKEN" --tls --port 3000
 ```
 
 You should get a tunnel URL like `https://golden-bifrost-004721.tunnel.yourdomain.com` pointing to your `localhost:3000`.
@@ -135,11 +140,21 @@ docker run -d \
   -e RATATOSK_TLS_EMAIL=you@yourdomain.com \
   -e RATATOSK_TLS_PROVIDER=cloudflare \
   -e RATATOSK_TLS_API_TOKEN=your-cloudflare-api-token \
+  -e RATATOSK_ADMIN_HOST=0.0.0.0 \
+  -e RATATOSK_ADMIN_USERNAME=admin \
+  -e RATATOSK_ADMIN_PASSWORD=replace-with-a-long-random-password \
+  -e RATATOSK_CONTROL_HOST=0.0.0.0 \
+  -e RATATOSK_CONTROL_TOKEN=replace-with-a-long-random-token \
+  -e RATATOSK_CONTROL_TLS_ENABLED=true \
+  -e RATATOSK_CONTROL_TLS_CERT_FILE=/run/secrets/control-cert.pem \
+  -e RATATOSK_CONTROL_TLS_KEY_FILE=/run/secrets/control-key.pem \
   -v ratatosk-certs:/data/certmagic \
+  -v /path/to/control-cert.pem:/run/secrets/control-cert.pem:ro \
+  -v /path/to/control-key.pem:/run/secrets/control-key.pem:ro \
   -p 80:80 \
   -p 443:443 \
   -p 7000:7000 \
-  -p 8081:8081 \
+  -p 127.0.0.1:8081:8081 \
   ratatosk-server
 ```
 
@@ -254,11 +269,26 @@ Create `/etc/ratatosk/ratatosk.yaml`:
 
 **With automatic TLS:**
 
+Automatic public TLS is provisioned after startup. The remote control and
+admin listeners therefore need a separately provisioned certificate that is
+already present on disk and valid for `tunnel.yourdomain.com`.
+
 ```yaml
 base_domain: tunnel.yourdomain.com
 public_port: 443
 admin_port: 8081
+admin_host: 0.0.0.0
+admin_username: admin
+admin_password: replace-with-a-long-random-password
+admin_tls_enabled: true
+admin_tls_cert_file: /etc/ratatosk/control/fullchain.pem
+admin_tls_key_file: /etc/ratatosk/control/privkey.pem
 control_port: 7000
+control_host: 0.0.0.0
+control_token: replace-with-a-long-random-token
+control_tls_enabled: true
+control_tls_cert_file: /etc/ratatosk/control/fullchain.pem
+control_tls_key_file: /etc/ratatosk/control/privkey.pem
 
 tls_auto: true
 tls_email: you@yourdomain.com
@@ -272,7 +302,18 @@ tls_api_token: your-cloudflare-api-token
 base_domain: tunnel.yourdomain.com
 public_port: 443
 admin_port: 8081
+admin_host: 0.0.0.0
+admin_username: admin
+admin_password: replace-with-a-long-random-password
+admin_tls_enabled: true
+admin_tls_cert_file: /etc/letsencrypt/live/tunnel.yourdomain.com/fullchain.pem
+admin_tls_key_file: /etc/letsencrypt/live/tunnel.yourdomain.com/privkey.pem
 control_port: 7000
+control_host: 0.0.0.0
+control_token: replace-with-a-long-random-token
+control_tls_enabled: true
+control_tls_cert_file: /etc/letsencrypt/live/tunnel.yourdomain.com/fullchain.pem
+control_tls_key_file: /etc/letsencrypt/live/tunnel.yourdomain.com/privkey.pem
 
 tls_enabled: true
 tls_cert_file: /etc/letsencrypt/live/tunnel.yourdomain.com/fullchain.pem
