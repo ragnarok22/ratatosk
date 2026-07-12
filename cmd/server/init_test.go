@@ -688,6 +688,53 @@ func TestRunInitRemovesNewTokenWhenConfigWriteFails(t *testing.T) {
 	}
 }
 
+func TestRunInitPreservesExistingTokenWhenConfigWriteFails(t *testing.T) {
+	var stdout bytes.Buffer
+	stubInitDeps(t, &stdout)
+
+	initCollectAnswers = func(answers *initAnswers) error {
+		*answers = initAnswers{BaseDomain: "tunnel.example.com", TLSAuto: true, RemoteControl: true}
+		return nil
+	}
+	initStat = func(path string) (os.FileInfo, error) {
+		if path == "ratatosk.yaml" || path == "control-token" {
+			return nil, nil
+		}
+		return nil, os.ErrNotExist
+	}
+	initConfirmOverwrite = func(string) (bool, error) { return true, nil }
+
+	existingToken := []byte("existing-control-token-must-survive\n")
+	currentToken := append([]byte(nil), existingToken...)
+	tokenWrites := 0
+	initWriteFile = func(path string, data []byte, _ os.FileMode) error {
+		switch path {
+		case "control-token":
+			tokenWrites++
+			currentToken = append(currentToken[:0], data...)
+			return nil
+		case "ratatosk.yaml":
+			return os.ErrPermission
+		default:
+			return nil
+		}
+	}
+
+	code := runInit()
+	if code != 1 {
+		t.Fatalf("runInit() = %d, want 1", code)
+	}
+	if tokenWrites != 0 {
+		t.Errorf("existing control token was rewritten %d time(s)", tokenWrites)
+	}
+	if !bytes.Equal(currentToken, existingToken) {
+		t.Fatalf("control token changed to %q after config write failure", currentToken)
+	}
+	if !strings.Contains(stdout.String(), "Error writing config") {
+		t.Errorf("output missing config write error: %s", stdout.String())
+	}
+}
+
 func TestRunInitRenderError(t *testing.T) {
 	var stdout bytes.Buffer
 	stubInitDeps(t, &stdout)

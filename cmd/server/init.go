@@ -277,13 +277,23 @@ func runInit() int {
 	}
 
 	var tokenData []byte
+	tokenWasAbsent := false
 	if answers.RemoteControl {
-		token, err := generateControlToken(initRandomReader)
-		if err != nil {
-			fmt.Fprintf(initStdout, "\n  Error generating control token: %v\n", err)
+		_, err := initStat(answers.ControlTokenFile)
+		switch {
+		case err == nil:
+		case errors.Is(err, fs.ErrNotExist):
+			tokenWasAbsent = true
+			token, err := generateControlToken(initRandomReader)
+			if err != nil {
+				fmt.Fprintf(initStdout, "\n  Error generating control token: %v\n", err)
+				return 1
+			}
+			tokenData = []byte(token + "\n")
+		default:
+			fmt.Fprintf(initStdout, "\n  Error checking control token file %s: %v\n", answers.ControlTokenFile, err)
 			return 1
 		}
-		tokenData = []byte(token + "\n")
 	}
 
 	data, err := renderConfig(initConfigTmpl, answers)
@@ -298,10 +308,7 @@ func runInit() int {
 		return 1
 	}
 
-	tokenWasAbsent := false
-	if answers.RemoteControl {
-		_, statErr := initStat(answers.ControlTokenFile)
-		tokenWasAbsent = errors.Is(statErr, fs.ErrNotExist)
+	if answers.RemoteControl && tokenWasAbsent {
 		if err := initWriteFile(answers.ControlTokenFile, tokenData, fs.FileMode(0600)); err != nil {
 			fmt.Fprintf(initStdout, "\n  Error writing control token file: %v\n", err)
 			fmt.Fprintln(initStdout, "  Hint: try running with sudo if writing to /etc/ratatosk/")

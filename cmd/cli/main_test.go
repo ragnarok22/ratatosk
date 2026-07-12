@@ -530,6 +530,33 @@ func TestConnectAndHandshakeTimesOut(t *testing.T) {
 	}
 }
 
+func TestConnectAndHandshakeTimesOutAfterTLSAuthentication(t *testing.T) {
+	address, caFile, authResult := startMockTLSRelay(t, testControlToken, func(net.Conn) {
+		time.Sleep(500 * time.Millisecond)
+	})
+
+	oldOptions := cliControlOptions
+	oldTimeout := cliHandshakeTimeout
+	cliControlOptions = controlOptions{Token: testControlToken, TLS: true, CAFile: caFile, ServerName: "127.0.0.1"}
+	cliHandshakeTimeout = 30 * time.Millisecond
+	t.Cleanup(func() {
+		cliControlOptions = oldOptions
+		cliHandshakeTimeout = oldTimeout
+	})
+
+	started := time.Now()
+	_, _, _, err := connectAndHandshake(address, &protocol.TunnelRequest{Protocol: protocol.ProtoHTTP})
+	if err == nil {
+		t.Fatal("connectAndHandshake succeeded when the relay stalled after authentication")
+	}
+	if elapsed := time.Since(started); elapsed >= 250*time.Millisecond {
+		t.Fatalf("connectAndHandshake returned after %v, want handshake timeout before relay close", elapsed)
+	}
+	if authErr := <-authResult; authErr != nil {
+		t.Fatalf("AuthenticateAsServer: %v", authErr)
+	}
+}
+
 func TestRunHTTPControlSecurityFlagsAndEnv(t *testing.T) {
 	oldOptions := cliControlOptions
 	t.Cleanup(func() { cliControlOptions = oldOptions })

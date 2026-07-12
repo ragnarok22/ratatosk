@@ -378,6 +378,10 @@ func connectAndHandshake(serverAddr string, tunnelReq *protocol.TunnelRequest) (
 			conn.Close()
 			return nil, nil, nil, fmt.Errorf("control authentication failed: %w", err)
 		}
+		if err := conn.SetDeadline(time.Now().Add(cliHandshakeTimeout)); err != nil {
+			conn.Close()
+			return nil, nil, nil, fmt.Errorf("restoring handshake deadline: %w", err)
+		}
 	}
 	slog.Info("connected to relay server", "addr", serverAddr)
 
