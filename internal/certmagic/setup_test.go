@@ -2,8 +2,14 @@ package certmagic
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"errors"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +17,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/caddyserver/certmagic"
 )
@@ -103,6 +110,90 @@ func TestNewManagerReturnsManageSyncError(t *testing.T) {
 	}
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("error = %v, want wrapped %v", err, wantErr)
+	}
+}
+
+func TestNewManagerRejectsUnsupportedProviderBeforeManaging(t *testing.T) {
+	oldManageSync := manageSyncFunc
+	t.Cleanup(func() { manageSyncFunc = oldManageSync })
+
+	manageCalled := false
+	manageSyncFunc = func(*certmagic.Config, context.Context, []string) error {
+		manageCalled = true
+		return nil
+	}
+
+	manager, err := NewManager(context.Background(), Config{Provider: "route53"})
+	if manager != nil {
+		t.Fatal("manager should be nil for an unsupported provider")
+	}
+	if err == nil || !strings.Contains(err.Error(), "unsupported DNS provider") {
+		t.Fatalf("error = %v, want unsupported DNS provider error", err)
+	}
+	if manageCalled {
+		t.Fatal("ManageSync was called for an unsupported provider")
+	}
+}
+
+func TestNewManagerRejectsMissingBaseDomainBeforeManaging(t *testing.T) {
+	oldManageSync := manageSyncFunc
+	t.Cleanup(func() { manageSyncFunc = oldManageSync })
+
+	manageCalled := false
+	manageSyncFunc = func(*certmagic.Config, context.Context, []string) error {
+		manageCalled = true
+		return nil
+	}
+
+	manager, err := NewManager(context.Background(), Config{
+		Provider: "cloudflare",
+		Domains:  []string{"*.example.com"},
+	})
+	if manager != nil {
+		t.Fatal("manager should be nil without a non-wildcard base domain")
+	}
+	if err == nil || !strings.Contains(err.Error(), "base domain") {
+		t.Fatalf("error = %v, want missing base domain error", err)
+	}
+	if manageCalled {
+		t.Fatal("ManageSync was called without a non-wildcard base domain")
+	}
+}
+
+func TestNewManagerSelectsBaseDomainAndUsesCertificateCache(t *testing.T) {
+	oldManageSync := manageSyncFunc
+	t.Cleanup(func() { manageSyncFunc = oldManageSync })
+
+	tlsCert := newTestCertificate(t, "cached.example.com")
+	manageSyncFunc = func(cfg *certmagic.Config, ctx context.Context, _ []string) error {
+		_, err := cfg.CacheUnmanagedTLSCertificate(ctx, tlsCert, nil)
+		return err
+	}
+
+	manager, err := NewManager(context.Background(), Config{
+		Email:    "test@example.com",
+		Provider: "cloudflare",
+		APIToken: "cf-token",
+		Domains:  []string{"*.example.com", "example.com", "ignored.example.com"},
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(manager.cache.Stop)
+
+	if manager.baseDomain != "example.com" {
+		t.Fatalf("baseDomain = %q, want example.com", manager.baseDomain)
+	}
+	if certs := manager.cache.AllMatchingCertificates("cached.example.com"); len(certs) != 1 {
+		t.Fatalf("cached certificates = %d, want 1", len(certs))
+	}
+
+	gotCert, err := manager.TLSConfig().GetCertificate(&tls.ClientHelloInfo{ServerName: "cached.example.com"})
+	if err != nil {
+		t.Fatalf("GetCertificate: %v", err)
+	}
+	if gotCert == nil || len(gotCert.Certificate) == 0 || !slices.Equal(gotCert.Certificate[0], tlsCert.Certificate[0]) {
+		t.Fatal("TLS config did not return the certificate from the manager cache")
 	}
 }
 
@@ -206,6 +297,32 @@ func TestManagerServeStartsHTTPSAndRedirect(t *testing.T) {
 		t.Errorf("untrusted host redirect location = %q, want %q", location, "https://example.com/path")
 	}
 
+	redirectTests := []struct {
+		name     string
+		host     string
+		location string
+	}{
+		{name: "subdomain", host: "api.example.com", location: "https://api.example.com/path"},
+		{name: "subdomain with port", host: "api.example.com:8080", location: "https://api.example.com/path"},
+		{name: "untrusted suffix", host: "example.com.attacker.test", location: "https://example.com/path"},
+		{name: "lookalike suffix", host: "notexample.com", location: "https://example.com/path"},
+		{name: "malformed authority", host: "api.example.com:80:90", location: "https://example.com/path"},
+	}
+	for _, tt := range redirectTests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(http.MethodGet, "http://example.com/path", nil)
+			request.Host = tt.host
+			response := httptest.NewRecorder()
+			httpServer.Handler.ServeHTTP(response, request)
+			if location := response.Header().Get("Location"); location != tt.location {
+				t.Errorf("redirect location = %q, want %q", location, tt.location)
+			}
+			if connection := response.Header().Get("Connection"); connection != "close" {
+				t.Errorf("Connection = %q, want close", connection)
+			}
+		})
+	}
+
 	httpsServer := <-httpsServers
 	response := httptest.NewRecorder()
 	httpsServer.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "https://example.com/", nil))
@@ -217,6 +334,106 @@ func TestManagerServeStartsHTTPSAndRedirect(t *testing.T) {
 	}
 	if !slices.Contains(httpsServer.TLSConfig.NextProtos, "h2") || !slices.Contains(httpsServer.TLSConfig.NextProtos, "http/1.1") {
 		t.Errorf("HTTPS protocols = %v, want h2 and http/1.1", httpsServer.TLSConfig.NextProtos)
+	}
+}
+
+func TestManagerServeReturnsListenErrors(t *testing.T) {
+	manager := newTestManager(t)
+	oldListen := listenFunc
+	t.Cleanup(func() { listenFunc = oldListen })
+
+	t.Run("HTTPS", func(t *testing.T) {
+		wantErr := errors.New("HTTPS listen failed")
+		listenFunc = func(network, address string) (net.Listener, error) {
+			if network != "tcp" || address != ":443" {
+				t.Fatalf("Listen(%q, %q), want tcp, :443", network, address)
+			}
+			return nil, wantErr
+		}
+
+		err := manager.Serve(http.NotFoundHandler())
+		if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "listen on :443") {
+			t.Fatalf("Serve error = %v, want wrapped :443 error", err)
+		}
+	})
+
+	t.Run("HTTP closes HTTPS listener", func(t *testing.T) {
+		wantErr := errors.New("HTTP listen failed")
+		httpsListener := newTestListener(":443")
+		listenFunc = func(_ string, address string) (net.Listener, error) {
+			switch address {
+			case ":443":
+				return httpsListener, nil
+			case ":80":
+				return nil, wantErr
+			default:
+				t.Fatalf("unexpected listen address %q", address)
+				return nil, nil
+			}
+		}
+
+		err := manager.Serve(http.NotFoundHandler())
+		if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "listen on :80") {
+			t.Fatalf("Serve error = %v, want wrapped :80 error", err)
+		}
+		select {
+		case <-httpsListener.closed:
+		default:
+			t.Fatal("HTTPS listener was not closed after HTTP listen failure")
+		}
+	})
+}
+
+func TestManagerServeHandlesServerReturnCombinations(t *testing.T) {
+	serverErr := errors.New("server failed")
+	tests := []struct {
+		name       string
+		first      string
+		firstErr   error
+		secondErr  error
+		wantErr    error
+		wantErrNil bool
+	}{
+		{name: "HTTP error returned first", first: "http", firstErr: serverErr, secondErr: http.ErrServerClosed, wantErr: serverErr},
+		{name: "HTTP nil then HTTPS error", first: "http", firstErr: nil, secondErr: serverErr, wantErr: serverErr},
+		{name: "HTTPS closed then HTTP error", first: "https", firstErr: http.ErrServerClosed, secondErr: serverErr, wantErr: serverErr},
+		{name: "HTTPS nil then HTTP closed", first: "https", firstErr: nil, secondErr: http.ErrServerClosed, wantErrNil: true},
+		{name: "HTTP closed then HTTPS nil", first: "http", firstErr: http.ErrServerClosed, secondErr: nil, wantErr: http.ErrServerClosed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := newTestManager(t)
+			oldListen := listenFunc
+			oldServeHTTP := serveHTTPFunc
+			oldServeHTTPS := serveHTTPSFunc
+			t.Cleanup(func() {
+				listenFunc = oldListen
+				serveHTTPFunc = oldServeHTTP
+				serveHTTPSFunc = oldServeHTTPS
+			})
+
+			listeners := map[string]*testListener{
+				":443": newTestListener(":443"),
+				":80":  newTestListener(":80"),
+			}
+			listenFunc = func(_ string, address string) (net.Listener, error) {
+				return listeners[address], nil
+			}
+			serveHTTPFunc = serverResultFunc(tt.first == "http", tt.firstErr, tt.secondErr)
+			serveHTTPSFunc = serverResultFunc(tt.first == "https", tt.firstErr, tt.secondErr)
+
+			err := manager.Serve(http.NotFoundHandler())
+			if tt.wantErrNil {
+				if err != nil {
+					t.Fatalf("Serve error = %v, want nil", err)
+				}
+				return
+			}
+			if !errors.Is(err, tt.wantErr) {
+				t.Fatalf("Serve error = %v, want %v", err, tt.wantErr)
+			}
+		})
 	}
 }
 
@@ -281,6 +498,45 @@ func TestSetupAndServeDelegatesToManager(t *testing.T) {
 	}
 }
 
+func TestSetupAndServeReturnsManageAndServeFailures(t *testing.T) {
+	oldManageSync := manageSyncFunc
+	oldListen := listenFunc
+	t.Cleanup(func() {
+		manageSyncFunc = oldManageSync
+		listenFunc = oldListen
+	})
+
+	t.Run("construction", func(t *testing.T) {
+		wantErr := errors.New("certificate management failed")
+		manageSyncFunc = func(*certmagic.Config, context.Context, []string) error { return wantErr }
+		listenFunc = func(string, string) (net.Listener, error) {
+			t.Fatal("SetupAndServe listened after manager construction failed")
+			return nil, nil
+		}
+
+		err := SetupAndServe(Config{Provider: "cloudflare", Domains: []string{"example.com"}}, http.NotFoundHandler())
+		if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "manage certificates") {
+			t.Fatalf("SetupAndServe error = %v, want wrapped construction error", err)
+		}
+	})
+
+	t.Run("serve", func(t *testing.T) {
+		manageSyncFunc = func(*certmagic.Config, context.Context, []string) error { return nil }
+		wantErr := errors.New("HTTPS unavailable")
+		listenFunc = func(_ string, address string) (net.Listener, error) {
+			if address != ":443" {
+				t.Fatalf("listen address = %q, want :443", address)
+			}
+			return nil, wantErr
+		}
+
+		err := SetupAndServe(Config{Provider: "cloudflare", Domains: []string{"example.com"}}, http.NotFoundHandler())
+		if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "listen on :443") {
+			t.Fatalf("SetupAndServe error = %v, want wrapped serve error", err)
+		}
+	})
+}
+
 func newTestManager(t *testing.T) *Manager {
 	t.Helper()
 	oldManageSync := manageSyncFunc
@@ -298,6 +554,39 @@ func newTestManager(t *testing.T) *Manager {
 	}
 	t.Cleanup(manager.cache.Stop)
 	return manager
+}
+
+func newTestCertificate(t *testing.T, domain string) tls.Certificate {
+	t.Helper()
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate certificate key: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: domain},
+		DNSNames:     []string{domain},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(48 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("create certificate: %v", err)
+	}
+	return tls.Certificate{Certificate: [][]byte{der}, PrivateKey: key}
+}
+
+func serverResultFunc(returnsFirst bool, firstErr, secondErr error) func(*http.Server, net.Listener) error {
+	return func(_ *http.Server, listener net.Listener) error {
+		if returnsFirst {
+			return firstErr
+		}
+		<-listener.(*testListener).closed
+		return secondErr
+	}
 }
 
 type testListener struct {

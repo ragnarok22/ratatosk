@@ -1,3 +1,5 @@
+COVERAGE_THRESHOLD ?= 85
+
 .PHONY: help dev-server dev-cli dev-dashboard build build-dashboard clean format format-check lint test test-race coverage dashboard-format-check dashboard-lint dashboard-typecheck dashboard-test docs-dev docs-build docs-preview
 
 help: ## Show this help
@@ -39,9 +41,17 @@ test: ## Run all tests
 test-race: ## Run tests with the race detector
 	go test -tags dev -race ./...
 
-coverage: ## Generate and display coverage report
+coverage: ## Generate coverage and enforce the minimum threshold
 	go test -tags dev -race -coverprofile=coverage.out ./...
 	go tool cover -func=coverage.out
+	@total=$$(go tool cover -func=coverage.out | awk '/^total:/ { gsub(/%/, "", $$3); print $$3 }'); \
+	awk -v total="$$total" -v threshold="$(COVERAGE_THRESHOLD)" 'BEGIN { \
+		if (total + 0 < threshold + 0) { \
+			printf "Coverage %.1f%% is below the required %.1f%%\n", total, threshold; \
+			exit 1; \
+		} \
+		printf "Coverage %.1f%% meets the required %.1f%%\n", total, threshold; \
+	}'
 
 dashboard-format-check: ## Check dashboard code formatting
 	cd cmd/server/dashboard && pnpm run format:check

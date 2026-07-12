@@ -62,6 +62,17 @@ func NewManager(ctx context.Context, cfg Config) (*Manager, error) {
 		return nil, err
 	}
 
+	baseDomain := ""
+	for _, domain := range cfg.Domains {
+		if domain != "" && !strings.HasPrefix(domain, "*.") {
+			baseDomain = domain
+			break
+		}
+	}
+	if baseDomain == "" {
+		return nil, errors.New("base domain is required")
+	}
+
 	var magicConfig *certmagic.Config
 	cache := certmagic.NewCache(certmagic.CacheOptions{
 		GetConfigForCert: func(certmagic.Certificate) (*certmagic.Config, error) {
@@ -94,13 +105,6 @@ func NewManager(ctx context.Context, cfg Config) (*Manager, error) {
 		return nil, fmt.Errorf("manage certificates: %w", err)
 	}
 
-	baseDomain := ""
-	for _, domain := range cfg.Domains {
-		if !strings.HasPrefix(domain, "*.") {
-			baseDomain = domain
-			break
-		}
-	}
 	return &Manager{
 		config:     magicConfig,
 		cache:      cache,
