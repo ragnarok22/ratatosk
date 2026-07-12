@@ -11,7 +11,7 @@
 [![codecov](https://codecov.io/gh/ragnarok22/ratatosk/branch/main/graph/badge.svg)](https://codecov.io/gh/ragnarok22/ratatosk)
 [![Release](https://github.com/ragnarok22/ratatosk/actions/workflows/release.yml/badge.svg)](https://github.com/ragnarok22/ratatosk/actions/workflows/release.yml)
 [![Go Version](https://img.shields.io/badge/go-1.26.1%2B-00ADD8?logo=go&logoColor=white)](https://go.dev/)
-[![Node.js Version](https://img.shields.io/badge/node-20%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
+[![Node.js Version](https://img.shields.io/badge/node-22.13%2B-339933?logo=node.js&logoColor=white)](https://nodejs.org/)
 [![GitHub Release](https://img.shields.io/github/v/release/ragnarok22/ratatosk)](https://github.com/ragnarok22/ratatosk/releases/latest)
 [![License: GPLv3](https://img.shields.io/badge/license-GPLv3-blue.svg)](./LICENSE)
 
@@ -60,9 +60,11 @@ curl -sSL https://raw.githubusercontent.com/ragnarok22/ratatosk/main/deploy/inst
 **Docker:**
 
 ```sh
-docker run -d --name ratatosk \
-  -p 7000:7000 -p 8080:8080 -p 8081:8081 \
-  ghcr.io/ragnarok22/ratatosk-server
+git clone https://github.com/ragnarok22/ratatosk.git
+cd ratatosk/deploy/compose
+cp .env.example .env
+# Configure the domain, admin credentials, control token, and TLS certificate paths.
+docker compose -f server.docker-compose.yml up -d
 ```
 
 See the [Deployment Guide](https://ragnarok22.github.io/ratatosk/guide/deployment) for DNS, TLS, and production setup.

@@ -66,5 +66,8 @@ jobs:
       - name: Typecheck
         run: make dashboard-typecheck
 
+      - name: Test
+        run: cd cmd/server/dashboard && pnpm test
+
       - name: Build
         run: make build-dashboard

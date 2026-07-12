@@ -13,7 +13,7 @@ Thanks for contributing. Ratatosk is still in alpha, so focused changes, clear r
 Prerequisites:
 
 - Go 1.26+
-- Node.js 20+
+- Node.js 22.13+
 - pnpm
 
 Install dashboard dependencies if you plan to work on the frontend:

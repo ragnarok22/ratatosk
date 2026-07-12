@@ -35,7 +35,7 @@ jobs:
         run: make build-dashboard
 
       - name: Run Tests
-        run: make test
+        run: make test && cd cmd/server/dashboard && pnpm test
 
       - name: Build Server (linux/amd64)
         env:
@@ -43,7 +43,7 @@ jobs:
           GOOS: linux
           GOARCH: amd64
         run: |
-          go build -ldflags="-s -w" -o dist/ratatosk-server-linux-amd64 ./cmd/server
+          go build -ldflags="-s -w -X main.Version=${{ github.ref_name }}" -o dist/ratatosk-server-linux-amd64 ./cmd/server
 
       - name: Build CLI Binaries
         run: |
@@ -79,6 +79,10 @@ jobs:
           cp deploy/Dockerfile.cli dist/
           cp deploy/compose/*.yml dist/
           cp deploy/compose/.env.example dist/
+
+      - name: Generate SHA-256 checksums
+        working-directory: dist
+        run: sha256sum ratatosk-server-* ratatosk-cli-* > checksums.txt
 
       - name: Generate Changelog
         id: changelog
@@ -122,6 +126,7 @@ jobs:
             dist/ratatosk-cli-linux-arm.tar.gz
             dist/ratatosk-cli-darwin-arm64.tar.gz
             dist/ratatosk-cli-darwin-amd64.tar.gz
+            dist/checksums.txt
             dist/ratatosk.yaml.example
             dist/ratatosk.service
             dist/Dockerfile.server
@@ -242,6 +247,8 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
 
       - name: Extract CLI metadata
         id: cli-meta
@@ -261,3 +268,5 @@ jobs:
           push: true
           tags: ${{ steps.cli-meta.outputs.tags }}
           labels: ${{ steps.cli-meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.ref_name }}

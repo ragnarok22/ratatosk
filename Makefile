@@ -1,4 +1,4 @@
-.PHONY: help dev-server dev-cli dev-dashboard build build-dashboard clean format format-check lint test test-race coverage dashboard-format-check dashboard-lint dashboard-typecheck docs-dev docs-build docs-preview
+.PHONY: help dev-server dev-cli dev-dashboard build build-dashboard clean format format-check lint test test-race coverage dashboard-format-check dashboard-lint dashboard-typecheck dashboard-test docs-dev docs-build docs-preview
 
 help: ## Show this help
 	@grep -E '^[a-zA-Z_-]+:.*?## .*$$' $(MAKEFILE_LIST) | awk 'BEGIN {FS = ":.*?## "}; {printf "  \033[36m%-24s\033[0m %s\n", $$1, $$2}'
@@ -13,7 +13,7 @@ dev-dashboard: ## Run the Vite dev server (React frontend)
 	cd cmd/server/dashboard && pnpm run dev
 
 build-dashboard: ## Build the React frontend
-	cd cmd/server/dashboard && pnpm install && pnpm run build
+	cd cmd/server/dashboard && pnpm install --frozen-lockfile && pnpm run build
 
 build: build-dashboard ## Build both server and CLI binaries
 	go build -o bin/server ./cmd/server
@@ -51,6 +51,9 @@ dashboard-lint: ## Lint dashboard code
 
 dashboard-typecheck: ## Type-check dashboard code
 	cd cmd/server/dashboard && pnpm run typecheck
+
+dashboard-test: ## Test dashboard code
+	cd cmd/server/dashboard && pnpm test
 
 clean: ## Remove build artifacts
 	rm -rf bin/ coverage.out cmd/server/dashboard/dist
