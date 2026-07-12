@@ -14,15 +14,14 @@ services:
       context: ../..
       dockerfile: deploy/Dockerfile.server
     container_name: ratatosk-server
-    ports:
-      - "7000:7000"
-      - "8080:8080"
-      - "8081:8081"
+    network_mode: host
     environment:
       - RATATOSK_BASE_DOMAIN=localhost
       - RATATOSK_PUBLIC_PORT=8080
       - RATATOSK_ADMIN_PORT=8081
+      - RATATOSK_ADMIN_HOST=127.0.0.1
       - RATATOSK_CONTROL_PORT=7000
+      - RATATOSK_CONTROL_HOST=127.0.0.1
 
   client:
     build:

@@ -17,11 +17,24 @@ base_domain: localhost
 # In production with TLS, set this to 443.
 public_port: 8080
 
-# Port for the admin dashboard and API.
+# Keep admin local-only unless browser authentication is configured.
+admin_host: 127.0.0.1
 admin_port: 8081
+# Required when admin_host is not a loopback address.
+admin_username: ""
+admin_password: ""
+admin_tls_enabled: false
+admin_tls_cert_file: ""
+admin_tls_key_file: ""
 
-# Port for the TCP control plane where CLI clients connect.
+# Keep the control plane local-only for development. A non-loopback binding
+# requires a token and a verified TLS certificate/key pair.
+control_host: 127.0.0.1
 control_port: 7000
+control_token: ""
+control_tls_enabled: false
+control_tls_cert_file: ""
+control_tls_key_file: ""
 
 # TLS Configuration
 # Enable TLS for the public proxy. Requires a valid certificate and key.
@@ -56,3 +69,7 @@ tls_provider: ""
 # Required when tls_auto is enabled.
 # Best practice: set via RATATOSK_TLS_API_TOKEN environment variable instead of config file.
 tls_api_token: ""
+
+# Dynamic public port range for TCP and UDP tunnels (end is exclusive).
+port_range_start: 10000
+port_range_end: 20000
