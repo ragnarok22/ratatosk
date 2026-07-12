@@ -11,6 +11,10 @@ You need a running Ratatosk relay server on a publicly accessible VPS. See the [
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
 | `server` | Yes | — | Relay server address in `host:port` format (e.g., `tunnel.example.com:7000`) |
+| `control_token` | Yes for remote relays | — | Pre-shared control-plane token configured on the relay |
+| `control_tls` | No | `true` | Verify TLS on the relay control connection |
+| `control_ca_file` | No | — | Path to a custom CA certificate inside the add-on |
+| `control_server_name` | No | — | TLS server-name override when it differs from the relay host |
 | `port` | No | `8123` | Local port to expose (Home Assistant default is 8123) |
 | `basic_auth` | No | — | Require HTTP Basic Auth for tunnel visitors (format: `user:pass`) |
 | `streamer` | No | `false` | Redact sensitive data (IPs, tokens) from logs for streaming |

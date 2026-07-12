@@ -5,6 +5,10 @@
     "armv7": "ghcr.io/home-assistant/armv7-base:3.21"
   },
   "args": {
-    "BUILD_ARCH": "{arch}"
+    "BUILD_ARCH": "{arch}",
+    "RATATOSK_VERSION": "v0.0.6",
+    "RATATOSK_SHA256_AMD64": "fbcf4a63914d817b230ea52ae3da24004f4b76b0077e1b87a8ccf5c9feb0d181",
+    "RATATOSK_SHA256_ARM64": "f65d58ab73576c3eec4236703f0eb6e790387924f4ac9d546f60acde2600c1cb",
+    "RATATOSK_SHA256_ARM": "eeb2937c20e6c5471775853eb47f71c2474059277c568f04494bf72f3913f6ab"
   }
 }

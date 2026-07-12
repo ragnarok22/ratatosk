@@ -1,6 +1,6 @@
 name: Ratatosk Tunnel
 description: Expose your Home Assistant instance to the internet via a Ratatosk tunnel
-version: "0.1.0"
+version: "0.2.0"
 slug: ratatosk
 url: https://github.com/ragnarok22/ratatosk
 arch:
@@ -13,11 +13,19 @@ host_network: true
 init: false
 options:
   server: ""
+  control_token: ""
+  control_tls: true
+  control_ca_file: ""
+  control_server_name: ""
   port: 8123
   basic_auth: ""
   streamer: false
 schema:
   server: str
+  control_token: password
+  control_tls: bool
+  control_ca_file: str?
+  control_server_name: str?
   port: port
   basic_auth: str?
   streamer: bool
