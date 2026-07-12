@@ -29,9 +29,9 @@ Open-source, self-hosted reverse proxy and tunneling tool. Expose local web serv
 - **Self-hosted** -- run on your own VPS with no usage limits, no accounts, and no vendor lock-in.
 - **HTTP, TCP, and UDP tunnels** -- expose web apps, SSH, databases, game servers, and more.
 - **Single binary** -- the relay server ships with an embedded React dashboard; no separate frontend install.
-- **Multiplexed connections** -- one outbound TCP connection handles thousands of concurrent requests via [yamux](https://github.com/hashicorp/yamux).
+- **Secure multiplexed control plane** -- one outbound TCP connection is protected by verified TLS and versioned shared-token authentication before [yamux](https://github.com/hashicorp/yamux) handles concurrent requests.
 - **Automatic TLS** -- built-in Let's Encrypt wildcard certificates via DNS-01 challenges (Cloudflare). No certbot needed.
-- **Basic Auth** -- protect HTTP tunnels with a username and password.
+- **Visitor Basic Auth** -- protect an HTTP tunnel from its visitors with a username and password, independently of control-plane authentication.
 - **Streamer mode** -- redact IPs, tokens, and file paths from output with `--streamer`.
 - **Self-update** -- the CLI can update itself with `ratatosk self-update`.
 
@@ -63,7 +63,7 @@ curl -sSL https://raw.githubusercontent.com/ragnarok22/ratatosk/main/deploy/inst
 git clone https://github.com/ragnarok22/ratatosk.git
 cd ratatosk/deploy/compose
 cp .env.example .env
-# Configure the domain, admin credentials, control token, and TLS certificate paths.
+# Configure the domain, admin credentials, control token, and TLS settings.
 docker compose -f server.docker-compose.yml up -d
 ```
 
@@ -72,13 +72,18 @@ See the [Deployment Guide](https://ragnarok22.github.io/ratatosk/guide/deploymen
 ### Create a Tunnel
 
 ```sh
+# A remote relay requires the same 32-byte-or-longer control token as the server.
+export RATATOSK_CONTROL_TOKEN_FILE="$HOME/.config/ratatosk/control-token"
+ratatosk --server tunnel.example.com:7000 --port 3000
+
+# A local loopback relay can be used without TLS or a token.
 ratatosk --port 3000
 ```
 
 ```
 Ratatosk                        (Ctrl+C to quit)
 
-Forwarding      http://golden-bifrost-004721.tunnel.example.com -> http://localhost:3000
+Forwarding      https://golden-bifrost-004721.tunnel.example.com -> http://localhost:3000
 Web Interface   http://127.0.0.1:4300
 ```
 

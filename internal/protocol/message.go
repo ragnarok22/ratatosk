@@ -23,7 +23,6 @@ type TunnelRequest struct {
 	Protocol  string `json:"protocol"`
 	LocalPort int    `json:"local_port"`
 	BasicAuth string `json:"basic_auth,omitempty"`
-	AuthToken string `json:"auth_token,omitempty"`
 }
 
 // TunnelResponse is sent by the server after processing a tunnel request.

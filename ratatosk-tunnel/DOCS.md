@@ -11,8 +11,8 @@ You need a running Ratatosk relay server on a publicly accessible VPS. See the [
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
 | `server` | Yes | — | Relay server address in `host:port` format (e.g., `tunnel.example.com:7000`) |
-| `control_token` | Yes for remote relays | — | Pre-shared control-plane token configured on the relay |
-| `control_tls` | No | `true` | Verify TLS on the relay control connection |
+| `control_token` | Yes for remote relays | — | Pre-shared control-plane token configured on the relay; passed to the CLI through its environment, not its arguments |
+| `control_tls` | No | `true` | Verify TLS on the relay control connection; remote relay addresses require TLS automatically |
 | `control_ca_file` | No | — | Path to a custom CA certificate inside the add-on |
 | `control_server_name` | No | — | TLS server-name override when it differs from the relay host |
 | `port` | No | `8123` | Local port to expose (Home Assistant default is 8123) |
@@ -25,8 +25,10 @@ To expose your Home Assistant dashboard running on port 8123:
 
 1. Install the add-on
 2. Set `server` to your relay server address (e.g., `tunnel.example.com:7000`)
-3. Start the add-on
-4. Your HA instance will be available at the generated subdomain URL (e.g., `https://golden-bifrost-004721.tunnel.example.com`)
+3. Set `control_token` to the token configured by the relay server
+4. If the relay uses a private CA or a certificate name different from its address, set `control_ca_file` or `control_server_name`
+5. Start the add-on
+6. Your HA instance will be available at the generated subdomain URL (e.g., `https://golden-bifrost-004721.tunnel.example.com`)
 
 ## Support
 

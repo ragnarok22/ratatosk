@@ -3,14 +3,24 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +29,7 @@ import (
 
 	autocert "ratatosk/internal/certmagic"
 	"ratatosk/internal/config"
+	"ratatosk/internal/control"
 	"ratatosk/internal/inspector"
 	"ratatosk/internal/protocol"
 	"ratatosk/internal/tunnel"
@@ -41,6 +52,67 @@ func (a fixedPortAllocator) Allocate() (int, error) {
 }
 
 func (fixedPortAllocator) Release(int) {}
+
+type fakeCertificateManager struct {
+	tlsConfig *tls.Config
+	serve     func(http.Handler) error
+}
+
+func (m *fakeCertificateManager) TLSConfig() *tls.Config {
+	return m.tlsConfig
+}
+
+func (m *fakeCertificateManager) Serve(handler http.Handler) error {
+	if m.serve == nil {
+		return nil
+	}
+	return m.serve(handler)
+}
+
+func generateTestCertificate(t *testing.T) (tls.Certificate, string, string) {
+	t.Helper()
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "localhost"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{"localhost"},
+	}
+	certificateDER, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatalf("CreateCertificate: %v", err)
+	}
+	privateKeyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatalf("MarshalPKCS8PrivateKey: %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateDER})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateKeyDER})
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "cert.pem")
+	keyFile := filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
+		t.Fatalf("WriteFile certificate: %v", err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		t.Fatalf("WriteFile private key: %v", err)
+	}
+
+	certificate, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("X509KeyPair: %v", err)
+	}
+	return certificate, certFile, keyFile
+}
 
 // freePort finds an available TCP port by binding to :0 and returning
 // the port the OS assigned. This avoids hardcoded ports that may be
@@ -808,7 +880,7 @@ func TestStartPublicServerHTTPSRedirectError(t *testing.T) {
 
 func TestStartPublicServerAutoTLS(t *testing.T) {
 	oldCfg := cfg
-	oldServeCertmagic := mainServeCertmagic
+	oldManager := autoTLSManager
 	cfg = &config.ServerConfig{
 		BaseDomain:  "tunnel.example.com",
 		PublicPort:  443,
@@ -819,32 +891,13 @@ func TestStartPublicServerAutoTLS(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		cfg = oldCfg
-		mainServeCertmagic = oldServeCertmagic
+		autoTLSManager = oldManager
 	})
 
 	stop := make(chan struct{})
 	called := make(chan struct{})
 
-	mainServeCertmagic = func(cmCfg autocert.Config, handler http.Handler) error {
-		if cmCfg.Email != "admin@example.com" {
-			t.Fatalf("email = %q, want %q", cmCfg.Email, "admin@example.com")
-		}
-		if cmCfg.Provider != "cloudflare" {
-			t.Fatalf("provider = %q, want %q", cmCfg.Provider, "cloudflare")
-		}
-		if cmCfg.APIToken != "test-token" {
-			t.Fatalf("api_token = %q, want %q", cmCfg.APIToken, "test-token")
-		}
-		if len(cmCfg.Domains) != 2 {
-			t.Fatalf("domains = %v, want 2 entries", cmCfg.Domains)
-		}
-		if cmCfg.Domains[0] != "tunnel.example.com" {
-			t.Fatalf("domains[0] = %q, want %q", cmCfg.Domains[0], "tunnel.example.com")
-		}
-		if cmCfg.Domains[1] != "*.tunnel.example.com" {
-			t.Fatalf("domains[1] = %q, want %q", cmCfg.Domains[1], "*.tunnel.example.com")
-		}
-
+	autoTLSManager = &fakeCertificateManager{serve: func(handler http.Handler) error {
 		// Verify handler is the HTTP proxy handler.
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.Host = "localhost:443"
@@ -857,7 +910,7 @@ func TestStartPublicServerAutoTLS(t *testing.T) {
 		close(called)
 		<-stop
 		return nil
-	}
+	}}
 
 	errs := startPublicServer(
 		stop,
@@ -885,7 +938,7 @@ func TestStartPublicServerAutoTLS(t *testing.T) {
 
 func TestStartPublicServerAutoTLSReturnsError(t *testing.T) {
 	oldCfg := cfg
-	oldServeCertmagic := mainServeCertmagic
+	oldManager := autoTLSManager
 	cfg = &config.ServerConfig{
 		BaseDomain:  "tunnel.example.com",
 		PublicPort:  443,
@@ -896,13 +949,13 @@ func TestStartPublicServerAutoTLSReturnsError(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		cfg = oldCfg
-		mainServeCertmagic = oldServeCertmagic
+		autoTLSManager = oldManager
 	})
 
 	wantErr := errors.New("certmagic failed")
-	mainServeCertmagic = func(cmCfg autocert.Config, handler http.Handler) error {
+	autoTLSManager = &fakeCertificateManager{serve: func(http.Handler) error {
 		return wantErr
-	}
+	}}
 
 	errs := startPublicServer(
 		make(chan struct{}),
@@ -1223,35 +1276,111 @@ func TestHTTPProxyUpgradeBidirectional(t *testing.T) {
 	}
 }
 
-func TestHandleConnectionRejectsMissingAndWrongToken(t *testing.T) {
+func TestSecureControlConnectionAuthenticatesBeforeYamux(t *testing.T) {
 	oldCfg := cfg
-	cfg = &config.ServerConfig{ControlToken: "control-secret"}
-	t.Cleanup(func() { cfg = oldCfg })
+	oldTLSConfig := controlTLSConfig
+	oldToken := controlToken
+	oldTimeout := serverHandshakeTimeout
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+		controlToken = oldToken
+		serverHandshakeTimeout = oldTimeout
+	})
 
-	for _, token := range []string{"", "wrong"} {
-		t.Run(token, func(t *testing.T) {
+	certificate, _, _ := generateTestCertificate(t)
+	leaf, err := x509.ParseCertificate(certificate.Certificate[0])
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+
+	const expectedToken = "0123456789abcdef0123456789abcdef"
+	cfg = &config.ServerConfig{ControlTLSEnabled: true}
+	controlTLSConfig = &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12}
+	controlToken = expectedToken
+	serverHandshakeTimeout = time.Second
+
+	tests := []struct {
+		name    string
+		token   string
+		wantErr bool
+	}{
+		{name: "correct token", token: expectedToken},
+		{name: "wrong token", token: "fedcba9876543210fedcba9876543210", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			clientConn, serverConn := net.Pipe()
-			defer clientConn.Close()
-			go handleConnection(serverConn)
+			t.Cleanup(func() {
+				clientConn.Close()
+				serverConn.Close()
+			})
 
-			session, err := tunnel.NewClientSession(clientConn)
-			if err != nil {
-				t.Fatalf("NewClientSession: %v", err)
+			type secureResult struct {
+				conn net.Conn
+				err  error
 			}
-			defer session.Close()
-			stream, err := session.Open()
-			if err != nil {
-				t.Fatalf("Open: %v", err)
+			serverResult := make(chan secureResult, 1)
+			applicationData := make(chan []byte, 1)
+			go func() {
+				secured, secureErr := secureControlConnection(serverConn)
+				serverResult <- secureResult{conn: secured, err: secureErr}
+				if secureErr != nil {
+					return
+				}
+				payload := make([]byte, len("yamux"))
+				if _, readErr := io.ReadFull(secured, payload); readErr == nil {
+					applicationData <- payload
+				}
+			}()
+
+			tlsClient := tls.Client(clientConn, &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				RootCAs:    roots,
+				ServerName: "localhost",
+			})
+			clientErr := control.AuthenticateAsClient(tlsClient, tt.token, time.Second)
+			result := <-serverResult
+
+			if tt.wantErr {
+				if !errors.Is(clientErr, control.ErrAuthenticationFailed) {
+					t.Fatalf("client authentication error = %v, want %v", clientErr, control.ErrAuthenticationFailed)
+				}
+				if !errors.Is(result.err, control.ErrAuthenticationFailed) {
+					t.Fatalf("server authentication error = %v, want %v", result.err, control.ErrAuthenticationFailed)
+				}
+				if result.conn != nil {
+					t.Fatal("wrong token returned a connection that could be passed to yamux")
+				}
+				select {
+				case payload := <-applicationData:
+					t.Fatalf("application data %q reached the pre-yamux connection", payload)
+				default:
+				}
+				return
 			}
-			if err := protocol.WriteRequest(stream, &protocol.TunnelRequest{Protocol: protocol.ProtoHTTP, AuthToken: token}); err != nil {
-				t.Fatalf("WriteRequest: %v", err)
+
+			if clientErr != nil {
+				t.Fatalf("AuthenticateAsClient: %v", clientErr)
 			}
-			response, err := protocol.ReadResponse(stream)
-			if err != nil {
-				t.Fatalf("ReadResponse: %v", err)
+			if result.err != nil {
+				t.Fatalf("secureControlConnection: %v", result.err)
 			}
-			if response.Success || response.Error != "authentication failed" {
-				t.Fatalf("response = %+v, want generic authentication failure", response)
+			if result.conn == nil {
+				t.Fatal("successful authentication returned a nil connection")
+			}
+			if _, err := tlsClient.Write([]byte("yamux")); err != nil {
+				t.Fatalf("write post-authentication data: %v", err)
+			}
+			select {
+			case payload := <-applicationData:
+				if string(payload) != "yamux" {
+					t.Fatalf("application data = %q, want yamux", payload)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("authenticated connection did not carry post-authentication data")
 			}
 		})
 	}
@@ -1277,21 +1406,188 @@ func TestHandleConnectionHandshakeTimeout(t *testing.T) {
 	}
 }
 
-func TestStartControlPlaneRejectsInvalidTLSKeyPair(t *testing.T) {
+func TestPrepareServerSecurityRejectsInvalidTLSKeyPair(t *testing.T) {
 	oldCfg := cfg
-	cfg = &config.ServerConfig{ControlTLSEnabled: true, ControlTLSCertFile: "missing-cert.pem", ControlTLSKeyFile: "missing-key.pem"}
-	t.Cleanup(func() { cfg = oldCfg })
-
-	called := false
-	err := startControlPlane(make(chan struct{}), func(string, string) (net.Listener, error) {
-		called = true
-		return nil, nil
+	oldTLSConfig := controlTLSConfig
+	oldToken := controlToken
+	oldManager := autoTLSManager
+	cfg = &config.ServerConfig{
+		ControlTLSEnabled:  true,
+		ControlTLSCertFile: "missing-cert.pem",
+		ControlTLSKeyFile:  "missing-key.pem",
+		ControlToken:       "0123456789abcdef0123456789abcdef",
+	}
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+		controlToken = oldToken
+		autoTLSManager = oldManager
 	})
+
+	err := prepareServerSecurity(context.Background())
 	if err == nil {
 		t.Fatal("expected invalid control TLS key pair error")
 	}
-	if called {
-		t.Fatal("listener opened before TLS key pair was validated")
+	if !strings.Contains(err.Error(), "loading control TLS key pair") {
+		t.Fatalf("error = %q, want key-pair context", err)
+	}
+}
+
+func TestPrepareServerSecurityPrefersDedicatedControlCertificate(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	oldToken := controlToken
+	oldManager := autoTLSManager
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+		controlToken = oldToken
+		autoTLSManager = oldManager
+	})
+
+	dedicatedCertificate, dedicatedCertFile, dedicatedKeyFile := generateTestCertificate(t)
+	_, publicCertFile, publicKeyFile := generateTestCertificate(t)
+	cfg = &config.ServerConfig{
+		ControlTLSEnabled:  true,
+		ControlTLSCertFile: dedicatedCertFile,
+		ControlTLSKeyFile:  dedicatedKeyFile,
+		ControlToken:       "0123456789abcdef0123456789abcdef",
+		TLSEnabled:         true,
+		TLSCertFile:        publicCertFile,
+		TLSKeyFile:         publicKeyFile,
+	}
+
+	if err := prepareServerSecurity(context.Background()); err != nil {
+		t.Fatalf("prepareServerSecurity: %v", err)
+	}
+	if controlTLSConfig == nil {
+		t.Fatal("control TLS config is nil")
+	}
+	if len(controlTLSConfig.Certificates) != 1 {
+		t.Fatalf("control TLS certificates = %d, want 1", len(controlTLSConfig.Certificates))
+	}
+	if !bytes.Equal(controlTLSConfig.Certificates[0].Certificate[0], dedicatedCertificate.Certificate[0]) {
+		t.Fatal("control TLS did not prefer its dedicated certificate")
+	}
+	if controlTLSConfig.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("minimum TLS version = %d, want TLS 1.2", controlTLSConfig.MinVersion)
+	}
+}
+
+func TestPrepareServerSecurityReusesPublicManualCertificate(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	oldToken := controlToken
+	oldManager := autoTLSManager
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+		controlToken = oldToken
+		autoTLSManager = oldManager
+	})
+
+	publicCertificate, publicCertFile, publicKeyFile := generateTestCertificate(t)
+	cfg = &config.ServerConfig{
+		ControlTLSEnabled: true,
+		ControlToken:      "0123456789abcdef0123456789abcdef",
+		TLSEnabled:        true,
+		TLSCertFile:       publicCertFile,
+		TLSKeyFile:        publicKeyFile,
+	}
+
+	if err := prepareServerSecurity(context.Background()); err != nil {
+		t.Fatalf("prepareServerSecurity: %v", err)
+	}
+	if controlTLSConfig == nil {
+		t.Fatal("control TLS config is nil")
+	}
+	if len(controlTLSConfig.Certificates) != 1 {
+		t.Fatalf("control TLS certificates = %d, want 1", len(controlTLSConfig.Certificates))
+	}
+	if !bytes.Equal(controlTLSConfig.Certificates[0].Certificate[0], publicCertificate.Certificate[0]) {
+		t.Fatal("control TLS did not reuse the public manual certificate")
+	}
+}
+
+func TestPrepareServerSecurityReusesAutomaticManager(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	oldToken := controlToken
+	oldManager := autoTLSManager
+	oldNewManager := mainNewCertmagicManager
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+		controlToken = oldToken
+		autoTLSManager = oldManager
+		mainNewCertmagicManager = oldNewManager
+	})
+
+	managerTLSConfig := &tls.Config{MinVersion: tls.VersionTLS13}
+	manager := &fakeCertificateManager{tlsConfig: managerTLSConfig}
+	var gotConfig autocert.Config
+	mainNewCertmagicManager = func(_ context.Context, managerConfig autocert.Config) (certificateManager, error) {
+		gotConfig = managerConfig
+		return manager, nil
+	}
+	cfg = &config.ServerConfig{
+		BaseDomain:        "tunnel.example.com",
+		ControlTLSEnabled: true,
+		ControlToken:      "0123456789abcdef0123456789abcdef",
+		TLSAuto:           true,
+		TLSEmail:          "admin@example.com",
+		TLSProvider:       "cloudflare",
+		TLSAPIToken:       "api-token",
+	}
+
+	if err := prepareServerSecurity(context.Background()); err != nil {
+		t.Fatalf("prepareServerSecurity: %v", err)
+	}
+	if gotConfig.Email != cfg.TLSEmail || gotConfig.Provider != cfg.TLSProvider || gotConfig.APIToken != cfg.TLSAPIToken {
+		t.Fatalf("manager config = %+v, want values from server config", gotConfig)
+	}
+	wantDomains := []string{"tunnel.example.com", "*.tunnel.example.com"}
+	if len(gotConfig.Domains) != len(wantDomains) || gotConfig.Domains[0] != wantDomains[0] || gotConfig.Domains[1] != wantDomains[1] {
+		t.Fatalf("manager domains = %v, want %v", gotConfig.Domains, wantDomains)
+	}
+	if autoTLSManager != manager {
+		t.Fatal("automatic TLS manager was not retained for public serving")
+	}
+	if controlTLSConfig != managerTLSConfig {
+		t.Fatal("control TLS did not reuse the automatic manager TLS configuration")
+	}
+}
+
+func TestPrepareServerSecurityLoadsTokenFile(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	oldToken := controlToken
+	oldManager := autoTLSManager
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+		controlToken = oldToken
+		autoTLSManager = oldManager
+	})
+
+	_, certFile, keyFile := generateTestCertificate(t)
+	const wantToken = "0123456789abcdef0123456789abcdef"
+	tokenFile := filepath.Join(t.TempDir(), "control-token")
+	if err := os.WriteFile(tokenFile, []byte("  \n"+wantToken+"\n  "), 0o600); err != nil {
+		t.Fatalf("WriteFile token: %v", err)
+	}
+	cfg = &config.ServerConfig{
+		ControlTLSEnabled:  true,
+		ControlTLSCertFile: certFile,
+		ControlTLSKeyFile:  keyFile,
+		ControlTokenFile:   tokenFile,
+	}
+
+	if err := prepareServerSecurity(context.Background()); err != nil {
+		t.Fatalf("prepareServerSecurity: %v", err)
+	}
+	if controlToken != wantToken {
+		t.Fatalf("control token = %q, want trimmed token", controlToken)
 	}
 }
 

@@ -19,7 +19,7 @@ fi
 ARGS=(--server "$SERVER" --port "$PORT")
 
 if [ -n "$CONTROL_TOKEN" ]; then
-  ARGS+=(--token "$CONTROL_TOKEN")
+  export RATATOSK_CONTROL_TOKEN="$CONTROL_TOKEN"
 fi
 
 if [ "$CONTROL_TLS" = "true" ]; then

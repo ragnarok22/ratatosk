@@ -23,10 +23,11 @@ func clearConfigEnv(t *testing.T) {
 		"RATATOSK_ADMIN_TLS_KEY_FILE",
 		"RATATOSK_CONTROL_HOST",
 		"RATATOSK_CONTROL_PORT",
-		"RATATOSK_CONTROL_TOKEN",
 		"RATATOSK_CONTROL_TLS_ENABLED",
 		"RATATOSK_CONTROL_TLS_CERT_FILE",
 		"RATATOSK_CONTROL_TLS_KEY_FILE",
+		"RATATOSK_CONTROL_TOKEN",
+		"RATATOSK_CONTROL_TOKEN_FILE",
 		"RATATOSK_TLS_ENABLED",
 		"RATATOSK_TLS_AUTO",
 		"RATATOSK_TLS_EMAIL",
@@ -66,6 +67,12 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.ControlPort != 7000 {
 		t.Errorf("ControlPort = %d, want %d", cfg.ControlPort, 7000)
 	}
+	if cfg.ControlTLSEnabled {
+		t.Error("ControlTLSEnabled should be false by default")
+	}
+	if cfg.ControlTLSCertFile != "" || cfg.ControlTLSKeyFile != "" || cfg.ControlToken != "" || cfg.ControlTokenFile != "" {
+		t.Errorf("control security defaults should be empty: %+v", cfg)
+	}
 	if cfg.TLSEnabled {
 		t.Error("TLSEnabled should be false by default")
 	}
@@ -104,7 +111,7 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	t.Setenv("RATATOSK_ADMIN_TLS_CERT_FILE", "/etc/ssl/admin-cert.pem")
 	t.Setenv("RATATOSK_ADMIN_TLS_KEY_FILE", "/etc/ssl/admin-key.pem")
 	t.Setenv("RATATOSK_CONTROL_HOST", "0.0.0.0")
-	t.Setenv("RATATOSK_CONTROL_TOKEN", "control-secret")
+	t.Setenv("RATATOSK_CONTROL_TOKEN", "0123456789abcdef0123456789abcdef")
 	t.Setenv("RATATOSK_CONTROL_TLS_ENABLED", "true")
 	t.Setenv("RATATOSK_CONTROL_TLS_CERT_FILE", "/etc/ssl/control-cert.pem")
 	t.Setenv("RATATOSK_CONTROL_TLS_KEY_FILE", "/etc/ssl/control-key.pem")
@@ -128,6 +135,18 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	}
 	if cfg.ControlHost != "0.0.0.0" {
 		t.Errorf("ControlHost = %q, want %q", cfg.ControlHost, "0.0.0.0")
+	}
+	if !cfg.ControlTLSEnabled {
+		t.Error("ControlTLSEnabled should be true")
+	}
+	if cfg.ControlTLSCertFile != "/etc/ssl/control-cert.pem" {
+		t.Errorf("ControlTLSCertFile = %q, want %q", cfg.ControlTLSCertFile, "/etc/ssl/control-cert.pem")
+	}
+	if cfg.ControlTLSKeyFile != "/etc/ssl/control-key.pem" {
+		t.Errorf("ControlTLSKeyFile = %q, want %q", cfg.ControlTLSKeyFile, "/etc/ssl/control-key.pem")
+	}
+	if cfg.ControlToken != "0123456789abcdef0123456789abcdef" {
+		t.Errorf("ControlToken = %q, want configured token", cfg.ControlToken)
 	}
 	if !cfg.TLSEnabled {
 		t.Error("TLSEnabled should be true")
@@ -178,6 +197,119 @@ tls_key_file: /etc/ssl/key.pem
 	}
 	if cfg.TLSKeyFile != "/etc/ssl/key.pem" {
 		t.Errorf("TLSKeyFile = %q, want %q", cfg.TLSKeyFile, "/etc/ssl/key.pem")
+	}
+}
+
+func TestLoadConfigControlSecuritySources(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+
+	tests := []struct {
+		name          string
+		fileContent   string
+		env           map[string]string
+		wantTLS       bool
+		wantCertFile  string
+		wantKeyFile   string
+		wantToken     string
+		wantTokenFile string
+	}{
+		{name: "defaults"},
+		{
+			name: "environment inline token",
+			env: map[string]string{
+				"RATATOSK_CONTROL_TLS_ENABLED":   "true",
+				"RATATOSK_CONTROL_TLS_CERT_FILE": "/env/control-cert.pem",
+				"RATATOSK_CONTROL_TLS_KEY_FILE":  "/env/control-key.pem",
+				"RATATOSK_CONTROL_TOKEN":         token,
+			},
+			wantTLS:      true,
+			wantCertFile: "/env/control-cert.pem",
+			wantKeyFile:  "/env/control-key.pem",
+			wantToken:    token,
+		},
+		{
+			name: "environment token file",
+			env: map[string]string{
+				"RATATOSK_CONTROL_TLS_ENABLED":   "true",
+				"RATATOSK_CONTROL_TLS_CERT_FILE": "/env/control-cert.pem",
+				"RATATOSK_CONTROL_TLS_KEY_FILE":  "/env/control-key.pem",
+				"RATATOSK_CONTROL_TOKEN_FILE":    "/env/control-token",
+			},
+			wantTLS:       true,
+			wantCertFile:  "/env/control-cert.pem",
+			wantKeyFile:   "/env/control-key.pem",
+			wantTokenFile: "/env/control-token",
+		},
+		{
+			name: "file inline token",
+			fileContent: `control_tls_enabled: true
+control_tls_cert_file: /file/control-cert.pem
+control_tls_key_file: /file/control-key.pem
+control_token: 0123456789abcdef0123456789abcdef
+`,
+			wantTLS:      true,
+			wantCertFile: "/file/control-cert.pem",
+			wantKeyFile:  "/file/control-key.pem",
+			wantToken:    token,
+		},
+		{
+			name: "file token file",
+			fileContent: `control_tls_enabled: true
+control_tls_cert_file: /file/control-cert.pem
+control_tls_key_file: /file/control-key.pem
+control_token_file: /file/control-token
+`,
+			wantTLS:       true,
+			wantCertFile:  "/file/control-cert.pem",
+			wantKeyFile:   "/file/control-key.pem",
+			wantTokenFile: "/file/control-token",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			clearConfigEnv(t)
+			for key, value := range tt.env {
+				t.Setenv(key, value)
+			}
+
+			homeDir := t.TempDir()
+			t.Setenv("HOME", homeDir)
+			workDir := t.TempDir()
+			if tt.fileContent != "" {
+				if err := os.WriteFile(filepath.Join(workDir, "ratatosk.yaml"), []byte(tt.fileContent), 0o644); err != nil {
+					t.Fatalf("WriteFile: %v", err)
+				}
+			}
+			originalDir, err := os.Getwd()
+			if err != nil {
+				t.Fatalf("Getwd: %v", err)
+			}
+			if err := os.Chdir(workDir); err != nil {
+				t.Fatalf("Chdir: %v", err)
+			}
+			t.Cleanup(func() { _ = os.Chdir(originalDir) })
+
+			cfg, err := LoadConfig()
+			if err != nil {
+				t.Fatalf("LoadConfig: %v", err)
+			}
+			if cfg.ControlTLSEnabled != tt.wantTLS {
+				t.Errorf("ControlTLSEnabled = %t, want %t", cfg.ControlTLSEnabled, tt.wantTLS)
+			}
+			if cfg.ControlTLSCertFile != tt.wantCertFile {
+				t.Errorf("ControlTLSCertFile = %q, want %q", cfg.ControlTLSCertFile, tt.wantCertFile)
+			}
+			if cfg.ControlTLSKeyFile != tt.wantKeyFile {
+				t.Errorf("ControlTLSKeyFile = %q, want %q", cfg.ControlTLSKeyFile, tt.wantKeyFile)
+			}
+			if cfg.ControlToken != tt.wantToken {
+				t.Errorf("ControlToken = %q, want %q", cfg.ControlToken, tt.wantToken)
+			}
+			if cfg.ControlTokenFile != tt.wantTokenFile {
+				t.Errorf("ControlTokenFile = %q, want %q", cfg.ControlTokenFile, tt.wantTokenFile)
+			}
+		})
 	}
 }
 
@@ -627,7 +759,7 @@ func TestValidateAcceptsProtectedRemoteBindings(t *testing.T) {
 	cfg.AdminTLSCertFile = "/etc/ssl/admin-cert.pem"
 	cfg.AdminTLSKeyFile = "/etc/ssl/admin-key.pem"
 	cfg.ControlHost = "0.0.0.0"
-	cfg.ControlToken = "control-secret"
+	cfg.ControlToken = "0123456789abcdef0123456789abcdef"
 	cfg.ControlTLSEnabled = true
 	cfg.ControlTLSCertFile = "/etc/ssl/control-cert.pem"
 	cfg.ControlTLSKeyFile = "/etc/ssl/control-key.pem"
@@ -649,9 +781,116 @@ func TestValidateAdminTLSRequiresCertAndKey(t *testing.T) {
 func TestValidateControlTLSRequiresCertAndKey(t *testing.T) {
 	cfg := validServerConfig()
 	cfg.ControlTLSEnabled = true
+	cfg.ControlToken = "0123456789abcdef0123456789abcdef"
 
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "control_tls_cert_file") {
 		t.Fatalf("Validate error = %v, want control TLS certificate requirement", err)
+	}
+}
+
+func TestValidateControlSecurityPolicy(t *testing.T) {
+	const token = "0123456789abcdef0123456789abcdef"
+
+	tests := []struct {
+		name    string
+		mutate  func(*ServerConfig)
+		wantErr string
+	}{
+		{name: "plaintext default loopback"},
+		{name: "plaintext IPv4 loopback range", mutate: func(cfg *ServerConfig) { cfg.ControlHost = "127.255.255.255" }},
+		{name: "plaintext IPv6 loopback", mutate: func(cfg *ServerConfig) { cfg.ControlHost = "::1" }},
+		{name: "plaintext localhost name rejected", mutate: func(cfg *ServerConfig) { cfg.ControlHost = "localhost" }, wantErr: "literal loopback IP"},
+		{name: "plaintext hostname rejected", mutate: func(cfg *ServerConfig) { cfg.ControlHost = "control.example.com" }, wantErr: "literal loopback IP"},
+		{name: "plaintext wildcard rejected", mutate: func(cfg *ServerConfig) { cfg.ControlHost = "0.0.0.0" }, wantErr: "literal loopback IP"},
+		{name: "plaintext inline token rejected", mutate: func(cfg *ServerConfig) { cfg.ControlToken = token }, wantErr: "must not be configured"},
+		{name: "plaintext token file rejected", mutate: func(cfg *ServerConfig) { cfg.ControlTokenFile = "/run/ratatosk/control-token" }, wantErr: "must not be configured"},
+		{name: "plaintext dedicated certificates rejected", mutate: func(cfg *ServerConfig) {
+			cfg.ControlTLSCertFile = "/tls/control.crt"
+			cfg.ControlTLSKeyFile = "/tls/control.key"
+		}, wantErr: "must not be configured"},
+		{name: "TLS requires token source", mutate: func(cfg *ServerConfig) {
+			cfg.ControlTLSEnabled = true
+			cfg.ControlTLSCertFile = "/tls/control.crt"
+			cfg.ControlTLSKeyFile = "/tls/control.key"
+		}, wantErr: "exactly one"},
+		{name: "TLS rejects both token sources", mutate: func(cfg *ServerConfig) {
+			cfg.ControlTLSEnabled = true
+			cfg.ControlTLSCertFile = "/tls/control.crt"
+			cfg.ControlTLSKeyFile = "/tls/control.key"
+			cfg.ControlToken = token
+			cfg.ControlTokenFile = "/run/ratatosk/control-token"
+		}, wantErr: "exactly one"},
+		{name: "TLS rejects short trimmed inline token", mutate: func(cfg *ServerConfig) {
+			cfg.ControlTLSEnabled = true
+			cfg.ControlTLSCertFile = "/tls/control.crt"
+			cfg.ControlTLSKeyFile = "/tls/control.key"
+			cfg.ControlToken = "   too-short   "
+		}, wantErr: "at least 32 bytes"},
+		{name: "TLS accepts 32 byte trimmed inline token", mutate: func(cfg *ServerConfig) {
+			cfg.ControlTLSEnabled = true
+			cfg.ControlTLSCertFile = "/tls/control.crt"
+			cfg.ControlTLSKeyFile = "/tls/control.key"
+			cfg.ControlToken = "  " + token + "  "
+		}},
+		{name: "TLS accepts nonexistent token file without reading it", mutate: func(cfg *ServerConfig) {
+			cfg.ControlHost = "0.0.0.0"
+			cfg.ControlTLSEnabled = true
+			cfg.ControlTLSCertFile = "/tls/control.crt"
+			cfg.ControlTLSKeyFile = "/tls/control.key"
+			cfg.ControlTokenFile = "/does/not/exist/control-token"
+		}},
+		{name: "TLS rejects certificate without key", mutate: func(cfg *ServerConfig) {
+			cfg.ControlTLSEnabled = true
+			cfg.ControlToken = token
+			cfg.ControlTLSCertFile = "/tls/control.crt"
+		}, wantErr: "configured together"},
+		{name: "TLS rejects key without certificate", mutate: func(cfg *ServerConfig) {
+			cfg.ControlTLSEnabled = true
+			cfg.ControlToken = token
+			cfg.ControlTLSKeyFile = "/tls/control.key"
+		}, wantErr: "configured together"},
+		{name: "TLS requires a certificate source", mutate: func(cfg *ServerConfig) {
+			cfg.ControlTLSEnabled = true
+			cfg.ControlToken = token
+		}, wantErr: "control TLS requires"},
+		{name: "TLS reuses public manual certificates", mutate: func(cfg *ServerConfig) {
+			cfg.ControlTLSEnabled = true
+			cfg.ControlToken = token
+			cfg.TLSEnabled = true
+			cfg.TLSCertFile = "/tls/public.crt"
+			cfg.TLSKeyFile = "/tls/public.key"
+		}},
+		{name: "TLS reuses automatic certificates", mutate: func(cfg *ServerConfig) {
+			cfg.BaseDomain = "tunnel.example.com"
+			cfg.PublicPort = 443
+			cfg.ControlHost = "0.0.0.0"
+			cfg.ControlTLSEnabled = true
+			cfg.ControlTokenFile = "/run/ratatosk/control-token"
+			cfg.TLSAuto = true
+			cfg.TLSEmail = "admin@example.com"
+			cfg.TLSProvider = "cloudflare"
+			cfg.TLSAPIToken = "api-token"
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validServerConfig()
+			if tt.mutate != nil {
+				tt.mutate(&cfg)
+			}
+
+			err := cfg.Validate()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("Validate: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("Validate error = %v, want error containing %q", err, tt.wantErr)
+			}
+		})
 	}
 }
 

@@ -16,10 +16,10 @@ If you've ever needed to share a local development server with a colleague, demo
 Ratatosk has three components:
 
 1. **Relay Server** -- runs on a public VPS, listens for incoming traffic, and routes it to the correct connected client. HTTP tunnels are routed by subdomain; TCP and UDP tunnels use dynamically allocated ports.
-2. **CLI Client** -- runs on your local machine. It establishes an outbound, persistent, multiplexed TCP connection to the relay server and forwards tunneled requests to a local port. Supports HTTP (`ratatosk --port 3000`), TCP (`ratatosk tcp 22`), and UDP (`ratatosk udp 25565`) tunnels.
+2. **CLI Client** -- runs on your local machine. It establishes an outbound, persistent control connection to the relay server and forwards tunneled requests to a local port. Remote control connections use verified TLS and versioned shared-token authentication before multiplexing. Supports HTTP (`ratatosk --port 3000`), TCP (`ratatosk tcp 22`), and UDP (`ratatosk udp 25565`) tunnels.
 3. **Dashboard** -- a React single-page application embedded directly into the relay server binary. It provides a UI to monitor active tunnels, bandwidth, and real-time traffic via WebSockets.
 
-The core of Ratatosk relies on [yamux](https://github.com/hashicorp/yamux) to multiplex a single TCP control channel into multiple concurrent logical streams. This means the CLI client only needs one outbound TCP connection -- no extra ports need to be opened on your local router. For TCP tunnels, raw bytes are copied bidirectionally over yamux streams. For UDP tunnels, datagrams are length-prefixed to preserve message boundaries.
+The core of Ratatosk relies on [yamux](https://github.com/hashicorp/yamux) to multiplex one control connection into concurrent logical streams. For a remote relay, the connection stack is TCP, verified TLS, versioned shared-token authentication, then yamux. This means the CLI client only needs one outbound connection -- no extra ports need to be opened on your local router. For TCP tunnels, raw bytes are copied bidirectionally over yamux streams. For UDP tunnels, datagrams are length-prefixed to preserve message boundaries.
 
 ## What's Next?
 

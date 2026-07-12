@@ -22,6 +22,8 @@ services:
       - RATATOSK_ADMIN_HOST=127.0.0.1
       - RATATOSK_CONTROL_PORT=7000
       - RATATOSK_CONTROL_HOST=127.0.0.1
+      # Loopback control traffic intentionally remains plaintext and tokenless.
+      - RATATOSK_CONTROL_TLS_ENABLED=false
 
   client:
     build:

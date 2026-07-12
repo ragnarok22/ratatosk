@@ -30,7 +30,9 @@ ReadOnlyPaths=/etc/ratatosk
 ReadWritePaths=/var/log/ratatosk /var/lib/ratatosk
 Environment=XDG_DATA_HOME=/var/lib/ratatosk
 
-# Environment (overrides config file values)
+# Environment (overrides config file values). For a remote control listener,
+# enable control TLS and configure exactly one of RATATOSK_CONTROL_TOKEN or
+# RATATOSK_CONTROL_TOKEN_FILE. Token files should be owned by ratatosk and 0600.
 # EnvironmentFile=-/etc/ratatosk/ratatosk.env
 
 # Logging

@@ -21,16 +21,17 @@ services:
     network_mode: host
     environment:
       - RATATOSK_SERVER=${RATATOSK_SERVER:?Set RATATOSK_SERVER to your relay address (e.g., tunnel.example.com:7000)}
-      - RATATOSK_CONTROL_TOKEN=${RATATOSK_CONTROL_TOKEN:?Set RATATOSK_CONTROL_TOKEN}
+      - RATATOSK_CONTROL_TOKEN=${RATATOSK_CONTROL_TOKEN:-}
+      - RATATOSK_CONTROL_TOKEN_FILE=${RATATOSK_CONTROL_TOKEN_FILE:-}
       - RATATOSK_CONTROL_TLS_ENABLED=${RATATOSK_CONTROL_TLS_ENABLED:-true}
       - RATATOSK_CONTROL_SERVER_NAME=${RATATOSK_CONTROL_SERVER_NAME:-}
-      # For a private CA, uncomment the environment value and volume below.
-      # - RATATOSK_CONTROL_CA_FILE=/run/secrets/control-ca.pem
+      - RATATOSK_CONTROL_CA_FILE=${RATATOSK_CONTROL_CA_FILE:-}
     command:
       - "--server=${RATATOSK_SERVER}"
       - "--port=${RATATOSK_PORT:-3000}"
-    # volumes:
-    #   - ${RATATOSK_CONTROL_CA_HOST_PATH}:/run/secrets/control-ca.pem:ro
+    volumes:
+      # Set *_FILE variables to paths under /run/secrets; files stay out of argv.
+      - ./secrets:/run/secrets:ro
     labels:
       - "com.centurylinklabs.watchtower.enable=true"
 

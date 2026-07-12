@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -20,6 +21,7 @@ import (
 
 	autocert "ratatosk/internal/certmagic"
 	"ratatosk/internal/config"
+	"ratatosk/internal/control"
 	"ratatosk/internal/protocol"
 	"ratatosk/internal/tunnel"
 	"ratatosk/internal/updater"
@@ -54,12 +56,23 @@ type portAllocator interface {
 
 var Version = "dev"
 
-const maxControlConnections = 1024
+const (
+	maxControlConnections       = 1024
+	maxPendingControlHandshakes = 128
+)
+
+type certificateManager interface {
+	TLSConfig() *tls.Config
+	Serve(http.Handler) error
+}
 
 var (
-	registry  tunnelRegistry = tunnel.NewRegistry()
-	cfg       *config.ServerConfig
-	portAlloc portAllocator
+	registry         tunnelRegistry = tunnel.NewRegistry()
+	cfg              *config.ServerConfig
+	portAlloc        portAllocator
+	controlTLSConfig *tls.Config
+	controlToken     string
+	autoTLSManager   certificateManager
 
 	mainStdout              io.Writer = os.Stdout
 	mainExit                          = os.Exit
@@ -74,11 +87,13 @@ var (
 	serverListenTCP                   = net.Listen
 	serverResolveUDPAddr              = net.ResolveUDPAddr
 	serverListenUDP                   = net.ListenUDP
-	mainServeCertmagic                = autocert.SetupAndServe
-	serverCheckUpdate                 = updater.CheckForUpdate
-	serverHandshakeTimeout            = 10 * time.Second
-	activeHTTPServersMu     sync.Mutex
-	activeHTTPServers       = make(map[*http.Server]struct{})
+	mainNewCertmagicManager           = func(ctx context.Context, cfg autocert.Config) (certificateManager, error) {
+		return autocert.NewManager(ctx, cfg)
+	}
+	serverCheckUpdate      = updater.CheckForUpdate
+	serverHandshakeTimeout = 10 * time.Second
+	activeHTTPServersMu    sync.Mutex
+	activeHTTPServers      = make(map[*http.Server]struct{})
 )
 
 func listenAndServe(addr string, handler http.Handler) error {
@@ -148,6 +163,19 @@ func runMain(
 		return 1
 	}
 
+	stop := make(chan struct{})
+	defer func() {
+		close(stop)
+		shutdownHTTPServers()
+	}()
+	signalContext, cancelSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancelSignals()
+
+	if err := prepareServerSecurity(signalContext); err != nil {
+		slog.Error("failed to initialize control security", "error", err)
+		return 1
+	}
+
 	portAlloc = tunnel.NewPortAllocator(cfg.PortRangeStart, cfg.PortRangeEnd)
 
 	go func(checkFn func(string) string, ver string) {
@@ -158,14 +186,6 @@ func runMain(
 			)
 		}
 	}(serverCheckUpdate, Version)
-
-	stop := make(chan struct{})
-	defer func() {
-		close(stop)
-		shutdownHTTPServers()
-	}()
-	signalContext, cancelSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancelSignals()
 
 	if err := serverStartControlPlane(stop, listen); err != nil {
 		slog.Error("failed to start TCP listener", "error", err)
@@ -196,6 +216,53 @@ func runMain(
 	return 0
 }
 
+func prepareServerSecurity(ctx context.Context) error {
+	controlTLSConfig = nil
+	controlToken = ""
+	autoTLSManager = nil
+
+	if cfg.TLSAuto {
+		manager, err := mainNewCertmagicManager(ctx, autocert.Config{
+			Email:    cfg.TLSEmail,
+			Provider: cfg.TLSProvider,
+			APIToken: cfg.TLSAPIToken,
+			Domains:  []string{cfg.BaseDomain, "*." + cfg.BaseDomain},
+		})
+		if err != nil {
+			return fmt.Errorf("preparing automatic TLS: %w", err)
+		}
+		autoTLSManager = manager
+	}
+
+	if !cfg.ControlTLSEnabled {
+		return nil
+	}
+
+	token, err := control.LoadToken(cfg.ControlToken, cfg.ControlTokenFile)
+	if err != nil {
+		return err
+	}
+	controlToken = token
+
+	certFile, keyFile := cfg.ControlTLSCertFile, cfg.ControlTLSKeyFile
+	if certFile == "" && cfg.TLSEnabled {
+		certFile, keyFile = cfg.TLSCertFile, cfg.TLSKeyFile
+	}
+	if certFile != "" {
+		certificate, err := tls.LoadX509KeyPair(certFile, keyFile)
+		if err != nil {
+			return fmt.Errorf("loading control TLS key pair: %w", err)
+		}
+		controlTLSConfig = &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12}
+		return nil
+	}
+	if autoTLSManager == nil {
+		return fmt.Errorf("control TLS certificate source is unavailable")
+	}
+	controlTLSConfig = autoTLSManager.TLSConfig()
+	return nil
+}
+
 func loadServerConfig(loadConfig func() (*config.ServerConfig, error)) error {
 	loaded, err := loadConfig()
 	if err != nil {
@@ -224,25 +291,14 @@ func startControlPlane(
 	stop <-chan struct{},
 	listen func(network, address string) (net.Listener, error),
 ) error {
-	var tlsConfig *tls.Config
-	if cfg.ControlTLSEnabled {
-		certificate, err := tls.LoadX509KeyPair(cfg.ControlTLSCertFile, cfg.ControlTLSKeyFile)
-		if err != nil {
-			return fmt.Errorf("loading control TLS key pair: %w", err)
-		}
-		tlsConfig = &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12}
-	}
-
 	ln, err := listen("tcp", cfg.ControlAddr())
 	if err != nil {
 		return err
 	}
-	if tlsConfig != nil {
-		ln = tls.NewListener(ln, tlsConfig)
-	}
-	slog.Info("control plane listening", "addr", cfg.ControlAddr())
+	slog.Info("control plane listening", "addr", cfg.ControlAddr(), "tls", cfg.ControlTLSEnabled)
 	var connections sync.Map
 	connectionSlots := make(chan struct{}, maxControlConnections)
+	handshakeSlots := make(chan struct{}, maxPendingControlHandshakes)
 
 	go func() {
 		<-stop
@@ -293,12 +349,49 @@ func startControlPlane(
 			go func() {
 				defer func() { <-connectionSlots }()
 				defer connections.Delete(conn)
-				handleConnection(conn)
+				select {
+				case handshakeSlots <- struct{}{}:
+				case <-stop:
+					conn.Close()
+					return
+				default:
+					slog.Warn("control handshake limit reached", "remote", conn.RemoteAddr())
+					conn.Close()
+					return
+				}
+				securedConn, err := secureControlConnection(conn)
+				<-handshakeSlots
+				if err != nil {
+					slog.Warn("control connection rejected", "remote", conn.RemoteAddr(), "error", err)
+					conn.Close()
+					return
+				}
+				handleConnection(securedConn)
 			}()
 		}
 	}()
 
 	return nil
+}
+
+func secureControlConnection(conn net.Conn) (net.Conn, error) {
+	if !cfg.ControlTLSEnabled {
+		return conn, nil
+	}
+	if controlTLSConfig == nil {
+		return nil, errors.New("control TLS is not initialized")
+	}
+	if err := conn.SetDeadline(time.Now().Add(serverHandshakeTimeout)); err != nil {
+		return nil, fmt.Errorf("setting TLS handshake deadline: %w", err)
+	}
+	tlsConn := tls.Server(conn, controlTLSConfig)
+	if err := tlsConn.Handshake(); err != nil {
+		return nil, fmt.Errorf("TLS handshake failed: %w", err)
+	}
+	if err := control.AuthenticateAsServer(tlsConn, controlToken, serverHandshakeTimeout); err != nil {
+		return nil, err
+	}
+	return tlsConn, nil
 }
 
 func startAdminServer(
@@ -343,13 +436,11 @@ func startPublicServer(
 				"email", cfg.TLSEmail,
 				"provider", cfg.TLSProvider,
 			)
-			cmCfg := autocert.Config{
-				Email:    cfg.TLSEmail,
-				Provider: cfg.TLSProvider,
-				APIToken: cfg.TLSAPIToken,
-				Domains:  []string{cfg.BaseDomain, "*." + cfg.BaseDomain},
+			if autoTLSManager == nil {
+				errs <- errors.New("automatic TLS is not initialized")
+				return
 			}
-			err := mainServeCertmagic(cmCfg, handler)
+			err := autoTLSManager.Serve(handler)
 			select {
 			case <-stop:
 				errs <- nil
@@ -448,7 +539,7 @@ func cleanupPort(port int, entry *tunnel.TunnelEntry, proto string) {
 
 func handleConnection(conn net.Conn) {
 	if err := conn.SetDeadline(time.Now().Add(serverHandshakeTimeout)); err != nil {
-		slog.Warn("failed to set handshake deadline", "error", err)
+		slog.Warn("failed to set tunnel handshake deadline", "error", err)
 	}
 	remote := conn.RemoteAddr().String()
 	slog.Info("new TCP connection", "remote", remote)
@@ -474,13 +565,8 @@ func handleConnection(conn net.Conn) {
 		controlStream.Close()
 		return
 	}
-	if cfg.ControlToken != "" && !constantTimeEqual(req.AuthToken, cfg.ControlToken) {
-		slog.Warn("control authentication failed", "remote", remote)
-		sendErrorAndClose(controlStream, "authentication failed")
-		return
-	}
 	if err := conn.SetDeadline(time.Time{}); err != nil {
-		slog.Warn("failed to clear handshake deadline", "remote", remote, "error", err)
+		slog.Warn("failed to clear tunnel handshake deadline", "remote", remote, "error", err)
 	}
 	slog.Info("received tunnel request", "remote", remote, "protocol", req.Protocol, "local_port", req.LocalPort)
 

@@ -151,23 +151,6 @@ func TestTunnelRequestWithBasicAuth(t *testing.T) {
 	}
 }
 
-func TestTunnelRequestWithAuthToken(t *testing.T) {
-	req := &TunnelRequest{Protocol: ProtoHTTP, LocalPort: 3000, AuthToken: "control-secret"}
-
-	var buf bytes.Buffer
-	if err := WriteRequest(&buf, req); err != nil {
-		t.Fatalf("WriteRequest: %v", err)
-	}
-
-	got, err := ReadRequest(&buf)
-	if err != nil {
-		t.Fatalf("ReadRequest: %v", err)
-	}
-	if got.AuthToken != req.AuthToken {
-		t.Fatalf("AuthToken = %q, want %q", got.AuthToken, req.AuthToken)
-	}
-}
-
 func TestTunnelRequestBasicAuthOmitEmpty(t *testing.T) {
 	req := &TunnelRequest{Protocol: "http", LocalPort: 3000}
 

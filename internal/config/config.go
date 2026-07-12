@@ -27,10 +27,11 @@ type ServerConfig struct {
 	AdminTLSKeyFile    string `mapstructure:"admin_tls_key_file"`
 	ControlHost        string `mapstructure:"control_host"`
 	ControlPort        int    `mapstructure:"control_port"`
-	ControlToken       string `mapstructure:"control_token"`
 	ControlTLSEnabled  bool   `mapstructure:"control_tls_enabled"`
 	ControlTLSCertFile string `mapstructure:"control_tls_cert_file"`
 	ControlTLSKeyFile  string `mapstructure:"control_tls_key_file"`
+	ControlToken       string `mapstructure:"control_token"`
+	ControlTokenFile   string `mapstructure:"control_token_file"`
 	TLSEnabled         bool   `mapstructure:"tls_enabled"`
 	TLSCertFile        string `mapstructure:"tls_cert_file"`
 	TLSKeyFile         string `mapstructure:"tls_key_file"`
@@ -96,15 +97,33 @@ func (c *ServerConfig) Validate() error {
 			return fmt.Errorf("admin_tls_enabled must be true for a non-loopback admin_host")
 		}
 	}
-	if c.ControlTLSEnabled && (c.ControlTLSCertFile == "" || c.ControlTLSKeyFile == "") {
-		return fmt.Errorf("control_tls_cert_file and control_tls_key_file are required when control_tls_enabled is true")
-	}
-	if !isLoopbackHost(c.ControlHost) {
-		if c.ControlToken == "" {
-			return fmt.Errorf("control_token is required for a non-loopback control_host")
+	if !c.ControlTLSEnabled {
+		if !isLiteralLoopbackIP(c.ControlHost) {
+			return fmt.Errorf("control_host must be a literal loopback IP when control_tls_enabled is false")
 		}
-		if !c.ControlTLSEnabled {
-			return fmt.Errorf("control_tls_enabled must be true for a non-loopback control_host")
+		if c.ControlToken != "" || c.ControlTokenFile != "" {
+			return fmt.Errorf("control_token and control_token_file must not be configured when control_tls_enabled is false")
+		}
+		if c.ControlTLSCertFile != "" || c.ControlTLSKeyFile != "" {
+			return fmt.Errorf("control_tls_cert_file and control_tls_key_file must not be configured when control_tls_enabled is false")
+		}
+	} else {
+		hasInlineToken := c.ControlToken != ""
+		hasTokenFile := c.ControlTokenFile != ""
+		if hasInlineToken == hasTokenFile {
+			return fmt.Errorf("exactly one of control_token or control_token_file is required when control_tls_enabled is true")
+		}
+		if hasInlineToken && len(strings.TrimSpace(c.ControlToken)) < 32 {
+			return fmt.Errorf("control_token must be at least 32 bytes after trimming whitespace")
+		}
+
+		hasControlCert := c.ControlTLSCertFile != ""
+		hasControlKey := c.ControlTLSKeyFile != ""
+		if hasControlCert != hasControlKey {
+			return fmt.Errorf("control_tls_cert_file and control_tls_key_file must be configured together")
+		}
+		if !hasControlCert && !c.TLSEnabled && !c.TLSAuto {
+			return fmt.Errorf("control TLS requires either control_tls_cert_file and control_tls_key_file, tls_enabled, or tls_auto")
 		}
 	}
 
@@ -178,6 +197,18 @@ func isLoopbackHost(host string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
+func isLiteralLoopbackIP(host string) bool {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	if strings.Contains(host, ":") {
+		return ip.Equal(net.IPv6loopback)
+	}
+	ipv4 := ip.To4()
+	return ipv4 != nil && ipv4[0] == 127
+}
+
 func validBaseDomain(domain string) bool {
 	if domain == "localhost" {
 		return true
@@ -218,10 +249,11 @@ func LoadConfig() (*ServerConfig, error) {
 	v.SetDefault("admin_tls_key_file", "")
 	v.SetDefault("control_host", "127.0.0.1")
 	v.SetDefault("control_port", 7000)
-	v.SetDefault("control_token", "")
 	v.SetDefault("control_tls_enabled", false)
 	v.SetDefault("control_tls_cert_file", "")
 	v.SetDefault("control_tls_key_file", "")
+	v.SetDefault("control_token", "")
+	v.SetDefault("control_token_file", "")
 	v.SetDefault("tls_enabled", false)
 	v.SetDefault("tls_cert_file", "")
 	v.SetDefault("tls_key_file", "")

@@ -23,17 +23,18 @@ base_domain: localhost       # Tunnels are <subdomain>.<base_domain>
 public_port: 8080            # Public HTTP(S) proxy port
 admin_host: 127.0.0.1        # Safe local-only dashboard bind
 admin_port: 8081             # Admin dashboard port
-admin_username: ""           # Required with password for remote admin binds
+admin_username: ""           # Admin dashboard Basic Auth username
 admin_password: ""
 admin_tls_enabled: false     # Required for remote admin binds
 admin_tls_cert_file: ""     # Admin server certificate (PEM)
 admin_tls_key_file: ""      # Admin private key (PEM)
 control_host: 127.0.0.1      # Safe local-only control-plane bind
 control_port: 7000           # TCP control plane port
-control_token: ""            # Required for remote control-plane binds
-control_tls_enabled: false   # Required for remote control-plane binds
-control_tls_cert_file: ""    # Control-plane server certificate (PEM)
-control_tls_key_file: ""     # Control-plane private key (PEM)
+control_token: ""            # Inline shared token; mutually exclusive with token file
+control_token_file: ""       # Shared-token file; preferred for deployed secrets
+control_tls_enabled: false   # Required unless control_host is a literal loopback IP
+control_tls_cert_file: ""    # Optional dedicated control certificate (PEM)
+control_tls_key_file: ""     # Optional dedicated control private key (PEM)
 tls_enabled: false           # Enable manual TLS on the public proxy
 tls_cert_file: ""            # Path to TLS certificate (PEM)
 tls_key_file: ""             # Path to TLS private key (PEM)
@@ -47,7 +48,7 @@ port_range_end: 20000        # End of dynamic port range (exclusive)
 
 ## Environment Variables
 
-Every option can be set via environment variables with the `RATATOSK_` prefix. Environment variables override config file values.
+Every option can be set via environment variables with the `RATATOSK_` prefix. Environment variables override the corresponding config file values. This precedence is per field: configuring `control_token` in YAML and `RATATOSK_CONTROL_TOKEN_FILE` in the environment leaves both final fields set and is rejected. Configure exactly one token source across all layers.
 
 | Variable | Default | Description |
 |---|---|---|
@@ -55,14 +56,15 @@ Every option can be set via environment variables with the `RATATOSK_` prefix. E
 | `RATATOSK_PUBLIC_PORT` | `8080` | Public HTTP(S) proxy port |
 | `RATATOSK_ADMIN_PORT` | `8081` | Admin dashboard port |
 | `RATATOSK_ADMIN_HOST` | `127.0.0.1` | Admin dashboard bind address |
-| `RATATOSK_ADMIN_USERNAME` | | Browser Basic Auth username |
-| `RATATOSK_ADMIN_PASSWORD` | | Browser Basic Auth password |
+| `RATATOSK_ADMIN_USERNAME` | | Admin dashboard Basic Auth username |
+| `RATATOSK_ADMIN_PASSWORD` | | Admin dashboard Basic Auth password |
 | `RATATOSK_ADMIN_TLS_ENABLED` | `false` | Enable admin TLS; required for non-loopback binds |
 | `RATATOSK_ADMIN_TLS_CERT_FILE` | | Admin TLS certificate path |
 | `RATATOSK_ADMIN_TLS_KEY_FILE` | | Admin TLS private-key path |
 | `RATATOSK_CONTROL_PORT` | `7000` | TCP control plane port |
 | `RATATOSK_CONTROL_HOST` | `127.0.0.1` | Control-plane bind address |
-| `RATATOSK_CONTROL_TOKEN` | | Pre-shared control-plane token |
+| `RATATOSK_CONTROL_TOKEN` | | Inline shared control token; mutually exclusive with `RATATOSK_CONTROL_TOKEN_FILE` |
+| `RATATOSK_CONTROL_TOKEN_FILE` | | Shared control-token file; mutually exclusive with `RATATOSK_CONTROL_TOKEN` |
 | `RATATOSK_CONTROL_TLS_ENABLED` | `false` | Enable control-plane TLS |
 | `RATATOSK_CONTROL_TLS_CERT_FILE` | | Control-plane certificate path |
 | `RATATOSK_CONTROL_TLS_KEY_FILE` | | Control-plane private key path |
@@ -89,13 +91,29 @@ The TCP/UDP port range is configurable via `port_range_start` and `port_range_en
 
 ## Control-Plane And Admin Security
 
-The default admin and control listeners bind to `127.0.0.1` and can run without credentials for local development. Ratatosk rejects unsafe remote configurations:
+The default admin and control listeners bind to `127.0.0.1`. Ratatosk rejects unsafe control-plane combinations:
 
-- A non-loopback `admin_host` requires both `admin_username` and `admin_password`.
-- A non-loopback `control_host` requires `control_token`, `control_tls_enabled`, and a valid control TLS certificate/key pair.
-- CLI clients connecting remotely must provide the same token and verify the server certificate. Ratatosk does not support disabling certificate verification.
+- A non-loopback `admin_host` requires admin TLS with a certificate/key pair and both `admin_username` and `admin_password`. Admin dashboard Basic Auth is separate from visitor Basic Auth on a tunnel.
+- Plaintext with no control authentication is allowed only when `control_host` is a literal loopback IP such as `127.0.0.1` or `::1`. `localhost`, wildcard binds, hostnames, and non-loopback IPs require TLS.
+- When `control_tls_enabled` is `true`, exactly one of `control_token` or `control_token_file` is required, even for loopback. The token is trimmed and must contain at least 32 bytes; token files are limited to 4 KiB.
+- When `control_tls_enabled` is `false`, control tokens and control certificate paths must not be configured.
+- CLI clients connecting remotely automatically use TLS, must provide the same control token, and always verify the server certificate. There is no insecure verification mode.
 
-The control certificate must contain the hostname used by CLI clients. It can be the same PEM certificate used for manual public TLS when that certificate covers both names.
+The control certificate must contain the hostname used by CLI clients. Certificate source precedence is:
+
+1. `control_tls_cert_file` and `control_tls_key_file`, when both are set, provide a dedicated control certificate and override certificate reuse.
+2. Otherwise, manual public TLS (`tls_enabled`) reuses `tls_cert_file` and `tls_key_file`.
+3. Otherwise, automatic public TLS (`tls_auto`) reuses the certificate managed by CertMagic.
+
+The public certificate can therefore protect both public HTTPS and the control listener when it covers the relay hostname. Use the dedicated control certificate fields to override either manual or CertMagic certificate reuse.
+
+### Credential Roles
+
+| Credential | Protects | Configuration |
+|---|---|---|
+| Control token | CLI-to-relay control connection | Server: exactly one of `control_token` or `control_token_file`; client: `RATATOSK_CONTROL_TOKEN` or `RATATOSK_CONTROL_TOKEN_FILE` |
+| Visitor Basic Auth | Visitors to one HTTP tunnel | Client `--basic-auth user:pass`; does not authenticate the client to the relay |
+| Cloudflare API token | ACME DNS-01 changes for automatic public TLS | Server `tls_api_token` or `RATATOSK_TLS_API_TOKEN`; never sent by a CLI client |
 
 ## TLS Configuration
 
@@ -134,6 +152,8 @@ tls_email: admin@example.com
 tls_provider: cloudflare
 tls_api_token: your-cloudflare-api-token
 ```
+
+This Cloudflare API token authorizes DNS changes for certificate issuance. It is not the shared control token used by CLI clients.
 
 Or via environment variables (recommended for secrets):
 

@@ -17,7 +17,7 @@ Deploy the relay server on your public VPS:
 ```sh
 cd deploy/compose
 cp .env.example .env
-# Edit .env: set RATATOSK_BASE_DOMAIN, TLS settings, etc.
+# Edit .env: set the domain, TLS settings, and a 32-byte-or-longer control token.
 docker compose -f server.docker-compose.yml up -d
 ```
 
@@ -28,11 +28,11 @@ Run the CLI client on your homelab machine to create a tunnel:
 ```sh
 cd deploy/compose
 cp .env.example .env
-# Edit .env: set RATATOSK_SERVER to your relay address
+# Edit .env: set RATATOSK_SERVER and the same RATATOSK_CONTROL_TOKEN as the relay.
 docker compose -f client.docker-compose.yml up -d
 ```
 
-The client uses `network_mode: host` so it can reach local services on the host machine. On Docker Desktop (Mac/Windows), see the comments in the compose file for alternatives using `host.docker.internal`.
+The client uses `network_mode: host` so it can reach local services on the host machine. Remote relay addresses automatically use verified TLS; `RATATOSK_CONTROL_TLS_ENABLED` is only needed to force TLS for a loopback address. On Docker Desktop (Mac/Windows), see the comments in the compose file for alternatives using `host.docker.internal`.
 
 ### Full Stack (Testing)
 
@@ -72,7 +72,8 @@ The integration monitors a running Ratatosk CLI instance via its inspector API a
 Run the Ratatosk CLI as a sidecar Docker container on the same network as Home Assistant. Start it with `--inspector-host 0.0.0.0` so the inspector API is reachable from other containers, then use the container name as the host in the integration config (e.g., `ratatosk:4040`).
 
 ```sh
-ratatosk --port 8123 --server tunnel.example.com:7000 --inspector-host 0.0.0.0
+RATATOSK_CONTROL_TOKEN_FILE=/run/secrets/control-token \
+  ratatosk --port 8123 --server tunnel.example.com:7000 --inspector-host 0.0.0.0
 ```
 :::
 
@@ -90,8 +91,12 @@ If you run Home Assistant OS or HA Supervised, install Ratatosk as an add-on:
 | Option | Required | Default | Description |
 |--------|----------|---------|-------------|
 | `server` | Yes | — | Relay server address (e.g., `tunnel.example.com:7000`) |
+| `control_token` | Yes for remote relays | — | Shared control token, at least 32 bytes |
+| `control_tls` | No | `true` | Force verified control TLS; remote addresses already enable it automatically |
+| `control_ca_file` | No | — | Private CA certificate path |
+| `control_server_name` | No | — | Certificate name when it differs from the relay address |
 | `port` | No | `8123` | Local port to expose (HA default is 8123) |
-| `basic_auth` | No | — | HTTP Basic Auth credentials (`user:pass`) |
+| `basic_auth` | No | — | Basic Auth credentials for HTTP tunnel visitors (`user:pass`) |
 | `streamer` | No | `false` | Redact sensitive data from logs |
 
 #### Example
@@ -99,19 +104,21 @@ If you run Home Assistant OS or HA Supervised, install Ratatosk as an add-on:
 To expose your Home Assistant dashboard:
 
 1. Set `server` to your relay address (e.g., `tunnel.example.com:7000`)
-2. Leave `port` at `8123` (the HA default)
-3. Optionally set `basic_auth` to protect the tunnel (e.g., `admin:secret`)
-4. Start the add-on
+2. Set `control_token` to the relay's shared token
+3. Leave `port` at `8123` (the HA default)
+4. Optionally set `basic_auth` to protect the tunnel from visitors (e.g., `admin:secret`)
+5. Start the add-on
 
 Your Home Assistant instance will be available at the generated tunnel URL (e.g., `https://golden-bifrost-004721.tunnel.example.com`).
 
 ## CLI Client with Environment Variables
 
-For non-Docker homelab setups, the CLI client supports the `RATATOSK_SERVER` environment variable as an alternative to the `--server` flag:
+For non-Docker homelab setups, the CLI client supports `RATATOSK_SERVER` and file-backed control tokens:
 
 ```sh
 export RATATOSK_SERVER=tunnel.example.com:7000
+export RATATOSK_CONTROL_TOKEN_FILE=/etc/ratatosk/control-token
 ratatosk --port 8123
 ```
 
-This is useful for systemd services, cron jobs, or any environment where passing flags is inconvenient. See the [CLI Commands](../reference/cli-commands.md) reference for all available options.
+The token file should be readable only by the account running Ratatosk. Use exactly one of `RATATOSK_CONTROL_TOKEN_FILE` or `RATATOSK_CONTROL_TOKEN`; the CLI has no `--token` flag. This control token authenticates the homelab client to the relay. It is separate from optional visitor Basic Auth and from the server's Cloudflare API token. See the [CLI Commands](../reference/cli-commands.md) reference for all available options.
