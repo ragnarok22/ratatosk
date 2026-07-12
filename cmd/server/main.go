@@ -3,13 +3,17 @@ package main
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/hashicorp/yamux"
@@ -32,9 +36,13 @@ type tunnelRegistry interface {
 	Register(subdomain string, session *yamux.Session, basicAuth string, protocol string)
 	Unregister(subdomain string)
 	HasSubdomain(subdomain string) bool
+	RegisterIfAbsent(subdomain string, session *yamux.Session, basicAuth string, protocol string) bool
+	UnregisterIfSession(subdomain string, session *yamux.Session) bool
 	GetEntry(subdomain string) (*tunnel.TunnelEntry, bool)
 	RegisterPort(port int, entry *tunnel.TunnelEntry)
 	UnregisterPort(port int)
+	RegisterPortIfAbsent(port int, entry *tunnel.TunnelEntry) bool
+	UnregisterPortIfEntry(port int, entry *tunnel.TunnelEntry) bool
 	GetPortEntry(port int) (*tunnel.TunnelEntry, bool)
 }
 
@@ -46,6 +54,8 @@ type portAllocator interface {
 
 var Version = "dev"
 
+const maxControlConnections = 1024
+
 var (
 	registry  tunnelRegistry = tunnel.NewRegistry()
 	cfg       *config.ServerConfig
@@ -55,8 +65,8 @@ var (
 	mainExit                          = os.Exit
 	mainLoadConfig                    = config.LoadConfig
 	mainListen                        = net.Listen
-	mainListenAndServe                = http.ListenAndServe
-	mainListenAndServeTLS             = http.ListenAndServeTLS
+	mainListenAndServe                = listenAndServe
+	mainListenAndServeTLS             = listenAndServeTLS
 	serverStartControlPlane           = startControlPlane
 	serverStartAdminServer            = startAdminServer
 	serverStartPublicServer           = startPublicServer
@@ -66,7 +76,51 @@ var (
 	serverListenUDP                   = net.ListenUDP
 	mainServeCertmagic                = autocert.SetupAndServe
 	serverCheckUpdate                 = updater.CheckForUpdate
+	serverHandshakeTimeout            = 10 * time.Second
+	activeHTTPServersMu     sync.Mutex
+	activeHTTPServers       = make(map[*http.Server]struct{})
 )
+
+func listenAndServe(addr string, handler http.Handler) error {
+	server := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+	trackHTTPServer(server, true)
+	defer trackHTTPServer(server, false)
+	return server.ListenAndServe()
+}
+
+func listenAndServeTLS(addr, certFile, keyFile string, handler http.Handler) error {
+	server := &http.Server{Addr: addr, Handler: handler, ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
+	trackHTTPServer(server, true)
+	defer trackHTTPServer(server, false)
+	return server.ListenAndServeTLS(certFile, keyFile)
+}
+
+func trackHTTPServer(server *http.Server, add bool) {
+	activeHTTPServersMu.Lock()
+	defer activeHTTPServersMu.Unlock()
+	if add {
+		activeHTTPServers[server] = struct{}{}
+	} else {
+		delete(activeHTTPServers, server)
+	}
+}
+
+func shutdownHTTPServers() {
+	activeHTTPServersMu.Lock()
+	servers := make([]*http.Server, 0, len(activeHTTPServers))
+	for server := range activeHTTPServers {
+		servers = append(servers, server)
+	}
+	activeHTTPServersMu.Unlock()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, server := range servers {
+		if err := server.Shutdown(ctx); err != nil {
+			slog.Warn("HTTP server shutdown failed", "addr", server.Addr, "error", err)
+		}
+	}
+}
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "init" {
@@ -106,6 +160,12 @@ func runMain(
 	}(serverCheckUpdate, Version)
 
 	stop := make(chan struct{})
+	defer func() {
+		close(stop)
+		shutdownHTTPServers()
+	}()
+	signalContext, cancelSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer cancelSignals()
 
 	if err := serverStartControlPlane(stop, listen); err != nil {
 		slog.Error("failed to start TCP listener", "error", err)
@@ -130,6 +190,8 @@ func runMain(
 			}
 			return 1
 		}
+	case <-signalContext.Done():
+		slog.Info("shutdown signal received")
 	}
 	return 0
 }
@@ -162,18 +224,37 @@ func startControlPlane(
 	stop <-chan struct{},
 	listen func(network, address string) (net.Listener, error),
 ) error {
+	var tlsConfig *tls.Config
+	if cfg.ControlTLSEnabled {
+		certificate, err := tls.LoadX509KeyPair(cfg.ControlTLSCertFile, cfg.ControlTLSKeyFile)
+		if err != nil {
+			return fmt.Errorf("loading control TLS key pair: %w", err)
+		}
+		tlsConfig = &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12}
+	}
+
 	ln, err := listen("tcp", cfg.ControlAddr())
 	if err != nil {
 		return err
 	}
+	if tlsConfig != nil {
+		ln = tls.NewListener(ln, tlsConfig)
+	}
 	slog.Info("control plane listening", "addr", cfg.ControlAddr())
+	var connections sync.Map
+	connectionSlots := make(chan struct{}, maxControlConnections)
 
 	go func() {
 		<-stop
 		ln.Close()
+		connections.Range(func(key, _ any) bool {
+			_ = key.(net.Conn).Close()
+			return true
+		})
 	}()
 
 	go func() {
+		var retryDelay time.Duration
 		for {
 			conn, err := ln.Accept()
 			if err != nil {
@@ -182,10 +263,38 @@ func startControlPlane(
 					return
 				default:
 				}
-				slog.Error("failed to accept connection", "error", err)
+				if retryDelay == 0 {
+					retryDelay = 5 * time.Millisecond
+				} else {
+					retryDelay *= 2
+				}
+				if retryDelay > time.Second {
+					retryDelay = time.Second
+				}
+				slog.Error("failed to accept connection", "error", err, "retry_delay", retryDelay)
+				timer := time.NewTimer(retryDelay)
+				select {
+				case <-stop:
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
 				continue
 			}
-			go handleConnection(conn)
+			retryDelay = 0
+			select {
+			case connectionSlots <- struct{}{}:
+			default:
+				slog.Warn("control connection limit reached", "remote", conn.RemoteAddr())
+				conn.Close()
+				continue
+			}
+			connections.Store(conn, struct{}{})
+			go func() {
+				defer func() { <-connectionSlots }()
+				defer connections.Delete(conn)
+				handleConnection(conn)
+			}()
 		}
 	}()
 
@@ -202,7 +311,12 @@ func startAdminServer(
 	slog.Info("admin dashboard listening", "addr", cfg.AdminAddr())
 
 	go func() {
-		err := serve(cfg.AdminAddr(), adminHandler)
+		var err error
+		if cfg.AdminTLSEnabled {
+			err = mainListenAndServeTLS(cfg.AdminAddr(), cfg.AdminTLSCertFile, cfg.AdminTLSKeyFile, adminHandler)
+		} else {
+			err = serve(cfg.AdminAddr(), adminHandler)
+		}
 		select {
 		case <-stop:
 			errs <- nil
@@ -248,12 +362,8 @@ func startPublicServer(
 		if cfg.TLSEnabled {
 			// Start HTTP->HTTPS redirect on port 80.
 			go func() {
-				redirect := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					target := "https://" + r.Host + r.URL.RequestURI()
-					http.Redirect(w, r, target, http.StatusMovedPermanently)
-				})
 				slog.Info("HTTP redirect server listening", "addr", ":80")
-				if err := serve(":80", redirect); err != nil {
+				if err := serve(":80", httpsRedirectHandler(cfg)); err != nil {
 					select {
 					case <-stop:
 					default:
@@ -286,6 +396,24 @@ func startPublicServer(
 	return errs
 }
 
+func httpsRedirectHandler(serverConfig *config.ServerConfig) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		host := serverConfig.BaseDomain
+		requestHost := r.Host
+		if parsedHost, _, err := net.SplitHostPort(requestHost); err == nil {
+			requestHost = parsedHost
+		}
+		if subdomain := extractSubdomain(requestHost, serverConfig.BaseDomain); subdomain != "" {
+			host = subdomain + "." + serverConfig.BaseDomain
+		}
+		if serverConfig.PublicPort != 443 {
+			host = net.JoinHostPort(host, fmt.Sprintf("%d", serverConfig.PublicPort))
+		}
+		target := "https://" + host + r.URL.RequestURI()
+		http.Redirect(w, r, target, http.StatusPermanentRedirect)
+	})
+}
+
 // sendErrorAndClose writes a failure TunnelResponse and closes the stream.
 func sendErrorAndClose(stream net.Conn, errMsg string) {
 	resp := &protocol.TunnelResponse{Success: false, Error: errMsg}
@@ -311,13 +439,17 @@ func awaitSessionEnd(session *yamux.Session, logKey string, logVal string) {
 }
 
 // cleanupPort unregisters a port from the registry and releases it back to the allocator.
-func cleanupPort(port int, proto string) {
-	registry.UnregisterPort(port)
-	portAlloc.Release(port)
-	slog.Info(proto+" tunnel unregistered", "port", port)
+func cleanupPort(port int, entry *tunnel.TunnelEntry, proto string) {
+	if registry.UnregisterPortIfEntry(port, entry) {
+		portAlloc.Release(port)
+		slog.Info(proto+" tunnel unregistered", "port", port)
+	}
 }
 
 func handleConnection(conn net.Conn) {
+	if err := conn.SetDeadline(time.Now().Add(serverHandshakeTimeout)); err != nil {
+		slog.Warn("failed to set handshake deadline", "error", err)
+	}
 	remote := conn.RemoteAddr().String()
 	slog.Info("new TCP connection", "remote", remote)
 
@@ -342,6 +474,14 @@ func handleConnection(conn net.Conn) {
 		controlStream.Close()
 		return
 	}
+	if cfg.ControlToken != "" && !constantTimeEqual(req.AuthToken, cfg.ControlToken) {
+		slog.Warn("control authentication failed", "remote", remote)
+		sendErrorAndClose(controlStream, "authentication failed")
+		return
+	}
+	if err := conn.SetDeadline(time.Time{}); err != nil {
+		slog.Warn("failed to clear handshake deadline", "remote", remote, "error", err)
+	}
 	slog.Info("received tunnel request", "remote", remote, "protocol", req.Protocol, "local_port", req.LocalPort)
 
 	switch req.Protocol {
@@ -352,16 +492,16 @@ func handleConnection(conn net.Conn) {
 	case protocol.ProtoUDP:
 		handleUDPTunnel(session, controlStream, req, remote)
 	default:
-		sendErrorAndClose(controlStream, fmt.Sprintf("unsupported protocol: %s", req.Protocol))
+		slog.Warn("unsupported tunnel protocol", "remote", remote, "protocol", req.Protocol)
+		sendErrorAndClose(controlStream, "unsupported protocol")
 	}
 }
 
 func handleHTTPTunnel(session *yamux.Session, controlStream net.Conn, req *protocol.TunnelRequest, remote string) {
-	// Generate a human-readable subdomain with collision check.
 	var subdomain string
 	for range 10 {
 		candidate := serverGenerateSubdomain()
-		if !registry.HasSubdomain(candidate) {
+		if registry.RegisterIfAbsent(candidate, session, req.BasicAuth, protocol.ProtoHTTP) {
 			subdomain = candidate
 			break
 		}
@@ -371,12 +511,10 @@ func handleHTTPTunnel(session *yamux.Session, controlStream net.Conn, req *proto
 		return
 	}
 
-	registry.Register(subdomain, session, req.BasicAuth, protocol.ProtoHTTP)
-
 	resp := &protocol.TunnelResponse{Subdomain: subdomain, URL: cfg.TunnelURL(subdomain), Success: true}
 	if err := protocol.WriteResponse(controlStream, resp); err != nil {
 		slog.Error("failed to send tunnel response", "remote", remote, "error", err)
-		registry.Unregister(subdomain)
+		registry.UnregisterIfSession(subdomain, session)
 		controlStream.Close()
 		return
 	}
@@ -390,21 +528,23 @@ func handleHTTPTunnel(session *yamux.Session, controlStream net.Conn, req *proto
 
 	awaitSessionEnd(session, "subdomain", subdomain)
 
-	registry.Unregister(subdomain)
+	registry.UnregisterIfSession(subdomain, session)
 	slog.Info("tunnel unregistered", "subdomain", subdomain, "remote", remote)
 }
 
 func handleTCPTunnel(session *yamux.Session, controlStream net.Conn, req *protocol.TunnelRequest, remote string) {
 	port, err := portAlloc.Allocate()
 	if err != nil {
-		sendErrorAndClose(controlStream, fmt.Sprintf("port allocation failed: %v", err))
+		slog.Error("TCP port allocation failed", "remote", remote, "error", err)
+		sendErrorAndClose(controlStream, "unable to create tunnel")
 		return
 	}
 
 	ln, err := serverListenTCP("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		portAlloc.Release(port)
-		sendErrorAndClose(controlStream, fmt.Sprintf("failed to listen on port %d: %v", port, err))
+		slog.Error("failed to listen for TCP tunnel", "remote", remote, "port", port, "error", err)
+		sendErrorAndClose(controlStream, "unable to create tunnel")
 		return
 	}
 
@@ -416,14 +556,19 @@ func handleTCPTunnel(session *yamux.Session, controlStream net.Conn, req *protoc
 		PublicPort:  port,
 		Listener:    ln,
 	}
-	registry.RegisterPort(port, entry)
+	if !registry.RegisterPortIfAbsent(port, entry) {
+		ln.Close()
+		portAlloc.Release(port)
+		slog.Error("allocated TCP port was already registered", "remote", remote, "port", port)
+		sendErrorAndClose(controlStream, "unable to create tunnel")
+		return
+	}
 
 	resp := &protocol.TunnelResponse{Port: port, Success: true}
 	if err := protocol.WriteResponse(controlStream, resp); err != nil {
 		slog.Error("failed to send tunnel response", "remote", remote, "error", err)
 		ln.Close()
-		registry.UnregisterPort(port)
-		portAlloc.Release(port)
+		cleanupPort(port, entry, "TCP")
 		controlStream.Close()
 		return
 	}
@@ -440,27 +585,30 @@ func handleTCPTunnel(session *yamux.Session, controlStream net.Conn, req *protoc
 
 	cancel()
 	ln.Close()
-	cleanupPort(port, "TCP")
+	cleanupPort(port, entry, "TCP")
 }
 
 func handleUDPTunnel(session *yamux.Session, controlStream net.Conn, req *protocol.TunnelRequest, remote string) {
 	port, err := portAlloc.Allocate()
 	if err != nil {
-		sendErrorAndClose(controlStream, fmt.Sprintf("port allocation failed: %v", err))
+		slog.Error("UDP port allocation failed", "remote", remote, "error", err)
+		sendErrorAndClose(controlStream, "unable to create tunnel")
 		return
 	}
 
 	udpAddr, err := serverResolveUDPAddr("udp", fmt.Sprintf(":%d", port))
 	if err != nil {
 		portAlloc.Release(port)
-		sendErrorAndClose(controlStream, fmt.Sprintf("failed to resolve UDP address: %v", err))
+		slog.Error("failed to resolve UDP tunnel address", "remote", remote, "port", port, "error", err)
+		sendErrorAndClose(controlStream, "unable to create tunnel")
 		return
 	}
 
 	udpConn, err := serverListenUDP("udp", udpAddr)
 	if err != nil {
 		portAlloc.Release(port)
-		sendErrorAndClose(controlStream, fmt.Sprintf("failed to listen on UDP port %d: %v", port, err))
+		slog.Error("failed to listen for UDP tunnel", "remote", remote, "port", port, "error", err)
+		sendErrorAndClose(controlStream, "unable to create tunnel")
 		return
 	}
 
@@ -472,14 +620,19 @@ func handleUDPTunnel(session *yamux.Session, controlStream net.Conn, req *protoc
 		PublicPort:  port,
 		Listener:    udpConn,
 	}
-	registry.RegisterPort(port, entry)
+	if !registry.RegisterPortIfAbsent(port, entry) {
+		udpConn.Close()
+		portAlloc.Release(port)
+		slog.Error("allocated UDP port was already registered", "remote", remote, "port", port)
+		sendErrorAndClose(controlStream, "unable to create tunnel")
+		return
+	}
 
 	resp := &protocol.TunnelResponse{Port: port, Success: true}
 	if err := protocol.WriteResponse(controlStream, resp); err != nil {
 		slog.Error("failed to send tunnel response", "remote", remote, "error", err)
 		udpConn.Close()
-		registry.UnregisterPort(port)
-		portAlloc.Release(port)
+		cleanupPort(port, entry, "UDP")
 		controlStream.Close()
 		return
 	}
@@ -496,7 +649,7 @@ func handleUDPTunnel(session *yamux.Session, controlStream net.Conn, req *protoc
 
 	cancel()
 	udpConn.Close()
-	cleanupPort(port, "UDP")
+	cleanupPort(port, entry, "UDP")
 }
 
 func handleHTTP(w http.ResponseWriter, r *http.Request) {
@@ -512,9 +665,23 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer stream.Close()
+	if deadline, ok := r.Context().Deadline(); ok {
+		if err := stream.SetDeadline(deadline); err != nil {
+			slog.Warn("failed to set tunnel stream deadline", "subdomain", subdomain, "error", err)
+		}
+	}
+	cancelWatchDone := make(chan struct{})
+	defer close(cancelWatchDone)
+	go func() {
+		select {
+		case <-r.Context().Done():
+			stream.Close()
+		case <-cancelWatchDone:
+		}
+	}()
 
-	// Write the HTTP request in wire format into the yamux stream.
-	if err := r.Write(stream); err != nil {
+	request := prepareProxyRequest(r, entry.BasicAuth != "")
+	if err := request.Write(stream); err != nil {
 		slog.Error("failed to write request to stream", "subdomain", subdomain, "error", err)
 		http.Error(w, "tunnel error", http.StatusBadGateway)
 		return
@@ -522,22 +689,126 @@ func handleHTTP(w http.ResponseWriter, r *http.Request) {
 
 	slog.Info("proxying request", "subdomain", subdomain, "method", r.Method, "path", r.URL.Path)
 
-	resp, err := http.ReadResponse(bufio.NewReader(stream), r)
+	streamReader := bufio.NewReader(stream)
+	resp, err := http.ReadResponse(streamReader, request)
 	if err != nil {
 		slog.Error("failed to read response from stream", "subdomain", subdomain, "error", err)
 		http.Error(w, "tunnel error", http.StatusBadGateway)
 		return
 	}
+	if resp.StatusCode == http.StatusSwitchingProtocols {
+		proxyUpgrade(w, stream, streamReader, resp, subdomain)
+		return
+	}
 	defer resp.Body.Close()
 
-	// Copy response headers from the tunnel to the client.
+	removeHopByHopHeaders(resp.Header)
 	for key, vals := range resp.Header {
 		for _, v := range vals {
 			w.Header().Add(key, v)
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+	if _, err := io.Copy(w, resp.Body); err != nil {
+		slog.Warn("failed to copy tunnel response", "subdomain", subdomain, "error", err)
+	}
+}
+
+func prepareProxyRequest(request *http.Request, stripAuthorization bool) *http.Request {
+	proxied := request.Clone(request.Context())
+	proxied.Header = request.Header.Clone()
+	upgrade := proxied.Header.Get("Upgrade")
+	removeHopByHopHeaders(proxied.Header)
+	if upgrade != "" {
+		proxied.Header.Set("Connection", "Upgrade")
+		proxied.Header.Set("Upgrade", upgrade)
+	}
+	if stripAuthorization {
+		proxied.Header.Del("Authorization")
+	}
+
+	clientIP := request.RemoteAddr
+	if host, _, err := net.SplitHostPort(request.RemoteAddr); err == nil {
+		clientIP = host
+	}
+	proto := "http"
+	if request.TLS != nil {
+		proto = "https"
+	}
+	for _, header := range []string{"Forwarded", "X-Forwarded-For", "X-Forwarded-Host", "X-Forwarded-Proto", "X-Real-IP"} {
+		proxied.Header.Del(header)
+	}
+	proxied.Header.Set("Forwarded", fmt.Sprintf("for=%s;proto=%s;host=%q", forwardedFor(clientIP), proto, request.Host))
+	proxied.Header.Set("X-Forwarded-For", clientIP)
+	proxied.Header.Set("X-Forwarded-Host", request.Host)
+	proxied.Header.Set("X-Forwarded-Proto", proto)
+	proxied.Header.Set("X-Real-IP", clientIP)
+	return proxied
+}
+
+func forwardedFor(host string) string {
+	if strings.Contains(host, ":") {
+		return fmt.Sprintf("%q", "["+host+"]")
+	}
+	return host
+}
+
+func removeHopByHopHeaders(header http.Header) {
+	for _, nominated := range strings.Split(header.Get("Connection"), ",") {
+		if nominated = strings.TrimSpace(nominated); nominated != "" {
+			header.Del(nominated)
+		}
+	}
+	for _, name := range []string{"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization", "Proxy-Connection", "TE", "Trailer", "Transfer-Encoding", "Upgrade"} {
+		header.Del(name)
+	}
+}
+
+func proxyUpgrade(w http.ResponseWriter, stream net.Conn, streamReader *bufio.Reader, response *http.Response, subdomain string) {
+	client, buffered, err := http.NewResponseController(w).Hijack()
+	if err != nil {
+		slog.Error("failed to hijack upgraded connection", "subdomain", subdomain, "error", err)
+		http.Error(w, "tunnel error", http.StatusBadGateway)
+		return
+	}
+	defer client.Close()
+
+	upgrade := response.Header.Get("Upgrade")
+	removeHopByHopHeaders(response.Header)
+	response.Header.Set("Connection", "Upgrade")
+	if upgrade != "" {
+		response.Header.Set("Upgrade", upgrade)
+	}
+	if _, err := fmt.Fprintf(buffered, "HTTP/1.1 %s\r\n", response.Status); err != nil {
+		return
+	}
+	if err := response.Header.Write(buffered); err != nil {
+		return
+	}
+	if _, err := buffered.WriteString("\r\n"); err != nil {
+		return
+	}
+	if err := buffered.Flush(); err != nil {
+		return
+	}
+
+	clientReader := io.Reader(client)
+	if buffered.Reader.Buffered() > 0 {
+		clientReader = buffered.Reader
+	}
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(stream, clientReader)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(client, streamReader)
+		done <- struct{}{}
+	}()
+	<-done
+	stream.Close()
+	client.Close()
+	<-done
 }
 
 // resolveHTTPTunnel extracts the subdomain from the request's Host header,
@@ -592,7 +863,7 @@ func checkBasicAuth(w http.ResponseWriter, r *http.Request, expected string) boo
 		return true
 	}
 	user, pass, ok := r.BasicAuth()
-	if !ok || user+":"+pass != expected {
+	if !ok || !constantTimeEqual(user+":"+pass, expected) {
 		w.Header().Set("WWW-Authenticate", `Basic realm="Ratatosk Tunnel"`)
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return false

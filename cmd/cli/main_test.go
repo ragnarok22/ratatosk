@@ -3,6 +3,8 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"crypto/tls"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
@@ -72,6 +74,79 @@ func TestRunVersionCommand(t *testing.T) {
 	}
 	if stderr.Len() != 0 {
 		t.Fatalf("stderr = %q, want empty", stderr.String())
+	}
+}
+
+func TestRunRejectsUnknownCommand(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	called := false
+
+	code := run(
+		[]string{"ratatosk", "tpc", "22"},
+		func(string) string { return "" },
+		&stdout,
+		&stderr,
+		func(string) error { return nil },
+		func(string, int, string) error {
+			called = true
+			return nil
+		},
+		noopRawClient,
+	)
+
+	if code == 0 {
+		t.Fatal("unknown command returned success")
+	}
+	if called {
+		t.Fatal("unknown command started an HTTP tunnel")
+	}
+}
+
+func TestRunHTTPRejectsInvalidPort(t *testing.T) {
+	for _, port := range []string{"0", "-1", "65536"} {
+		t.Run(port, func(t *testing.T) {
+			var stdout bytes.Buffer
+			var stderr bytes.Buffer
+			called := false
+
+			code := runHTTPCommand(
+				[]string{"ratatosk", "--port", port},
+				func(string) string { return "" },
+				&stdout,
+				&stderr,
+				func(string, int, string) error {
+					called = true
+					return nil
+				},
+			)
+
+			if code == 0 {
+				t.Fatalf("port %s returned success", port)
+			}
+			if called {
+				t.Fatalf("port %s started a tunnel", port)
+			}
+		})
+	}
+}
+
+func TestRunHTTPRejectsUnexpectedArguments(t *testing.T) {
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	called := false
+	code := runHTTPCommand(
+		[]string{"ratatosk", "unexpected"},
+		func(string) string { return "" },
+		&stdout,
+		&stderr,
+		func(string, int, string) error {
+			called = true
+			return nil
+		},
+	)
+	if code == 0 || called {
+		t.Fatalf("unexpected argument returned code %d and called client=%v", code, called)
 	}
 }
 
@@ -297,6 +372,130 @@ func TestRunExplicitServerBeatsEnvOverride(t *testing.T) {
 	}
 	if gotServer != "manual.example:1234" {
 		t.Fatalf("server = %q, want %q", gotServer, "manual.example:1234")
+	}
+}
+
+func TestBuildControlTLSConfig(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+	certificate := server.Certificate()
+	caFile := t.TempDir() + "/ca.pem"
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificate.Raw}), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	config, err := buildControlTLSConfig("relay.example:7000", caFile, "example.com")
+	if err != nil {
+		t.Fatalf("buildControlTLSConfig: %v", err)
+	}
+	if config.ServerName != "example.com" {
+		t.Fatalf("ServerName = %q, want example.com", config.ServerName)
+	}
+	if config.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("MinVersion = %d, want TLS 1.2", config.MinVersion)
+	}
+	if config.RootCAs == nil || len(config.RootCAs.Subjects()) == 0 {
+		t.Fatal("custom CA was not loaded")
+	}
+}
+
+func TestConnectAndHandshakeWithVerifiedTLSAndToken(t *testing.T) {
+	certificateServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	certificate := certificateServer.TLS.Certificates[0]
+	leaf := certificateServer.Certificate()
+	certificateServer.Close()
+
+	caFile := t.TempDir() + "/ca.pem"
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	tlsListener := tls.NewListener(listener, &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12})
+	t.Cleanup(func() { tlsListener.Close() })
+	requestReceived := make(chan *protocol.TunnelRequest, 1)
+	go func() {
+		conn, acceptErr := tlsListener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		session, sessionErr := tunnel.NewServerSession(conn)
+		if sessionErr != nil {
+			return
+		}
+		defer session.Close()
+		stream, streamErr := session.Accept()
+		if streamErr != nil {
+			return
+		}
+		request, readErr := protocol.ReadRequest(stream)
+		if readErr != nil {
+			return
+		}
+		requestReceived <- request
+		_ = protocol.WriteResponse(stream, &protocol.TunnelResponse{Success: true, Subdomain: "secure"})
+		stream.Close()
+		_, _ = session.Accept()
+	}()
+
+	oldOptions := cliControlOptions
+	cliControlOptions = controlOptions{TLS: true, CAFile: caFile, ServerName: "127.0.0.1", AuthToken: "control-secret"}
+	t.Cleanup(func() { cliControlOptions = oldOptions })
+	conn, session, _, err := connectAndHandshake(tlsListener.Addr().String(), &protocol.TunnelRequest{Protocol: protocol.ProtoHTTP, AuthToken: cliControlOptions.AuthToken})
+	if err != nil {
+		t.Fatalf("connectAndHandshake: %v", err)
+	}
+	session.Close()
+	conn.Close()
+
+	select {
+	case request := <-requestReceived:
+		if request.AuthToken != "control-secret" {
+			t.Fatalf("AuthToken = %q", request.AuthToken)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("TLS relay did not receive tunnel request")
+	}
+}
+
+func TestConnectAndHandshakeTimesOut(t *testing.T) {
+	address := startMockRelay(t, func(conn net.Conn) {
+		defer conn.Close()
+		time.Sleep(200 * time.Millisecond)
+	})
+	oldTimeout := cliHandshakeTimeout
+	cliHandshakeTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { cliHandshakeTimeout = oldTimeout })
+
+	if _, _, _, err := connectAndHandshake(address, &protocol.TunnelRequest{Protocol: protocol.ProtoHTTP}); err == nil {
+		t.Fatal("connectAndHandshake did not enforce its handshake deadline")
+	}
+}
+
+func TestRunHTTPControlSecurityFlagsAndEnv(t *testing.T) {
+	oldOptions := cliControlOptions
+	t.Cleanup(func() { cliControlOptions = oldOptions })
+
+	code := runHTTPCommand(
+		[]string{"ratatosk", "--tls", "--ca", "/tmp/ca.pem", "--server-name", "relay.example"},
+		func(key string) string {
+			if key == "RATATOSK_AUTH_TOKEN" {
+				return "control-secret"
+			}
+			return ""
+		},
+		io.Discard,
+		io.Discard,
+		func(string, int, string) error { return nil },
+	)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0", code)
+	}
+	if !cliControlOptions.TLS || cliControlOptions.CAFile != "/tmp/ca.pem" || cliControlOptions.ServerName != "relay.example" || cliControlOptions.AuthToken != "control-secret" {
+		t.Fatalf("control options = %+v", cliControlOptions)
 	}
 }
 
@@ -576,6 +775,37 @@ func TestRunClientAbruptDisconnect(t *testing.T) {
 	}
 }
 
+func TestRunClientUnexpectedAcceptFailure(t *testing.T) {
+	addr := startMockRelay(t, func(conn net.Conn) {
+		session, err := tunnel.NewServerSession(conn)
+		if err != nil {
+			conn.Close()
+			return
+		}
+
+		cs, err := session.Accept()
+		if err != nil {
+			conn.Close()
+			return
+		}
+		protocol.ReadRequest(cs)
+		protocol.WriteResponse(cs, &protocol.TunnelResponse{Success: true, Subdomain: "test-accept-error"})
+		cs.Close()
+
+		time.Sleep(100 * time.Millisecond)
+		conn.Write([]byte{0})
+		conn.Close()
+	})
+
+	err := runClient(addr, 13005, "")
+	if err == nil {
+		t.Fatal("expected unexpected session accept failure")
+	}
+	if !strings.Contains(err.Error(), "accept") {
+		t.Fatalf("error = %q, want accept context", err)
+	}
+}
+
 func TestRunClientServerClosesEarly(t *testing.T) {
 	addr := startMockRelay(t, func(conn net.Conn) {
 		session, _ := tunnel.NewServerSession(conn)
@@ -689,8 +919,8 @@ func TestRunClientUsesFallbackURLWhenResponseURLMissing(t *testing.T) {
 		os.Stdout = oldStdout
 	})
 
-	cliStartInspector = func(*inspector.Logger, string) (string, error) {
-		return "", errors.New("inspector unavailable")
+	cliStartInspector = func(*inspector.Logger, string) (*inspector.Server, error) {
+		return nil, errors.New("inspector unavailable")
 	}
 
 	r, w, err := os.Pipe()
@@ -753,7 +983,11 @@ func TestHandleStream(t *testing.T) {
 	clientConn, serverConn := net.Pipe()
 	logger := inspector.NewLogger()
 
-	go handleStream(serverConn, local.Listener.Addr().String(), logger)
+	done := make(chan struct{})
+	go func() {
+		handleStream(serverConn, local.Listener.Addr().String(), logger)
+		close(done)
+	}()
 
 	fmt.Fprintf(clientConn, "GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
 
@@ -763,6 +997,11 @@ func TestHandleStream(t *testing.T) {
 	}
 	resp.Body.Close()
 	clientConn.Close()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleStream did not return")
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("status = %d, want 200", resp.StatusCode)
@@ -1155,6 +1394,37 @@ func TestRunRawClientAbruptDisconnect(t *testing.T) {
 	}
 }
 
+func TestRunRawClientUnexpectedAcceptFailure(t *testing.T) {
+	addr := startMockRelay(t, func(conn net.Conn) {
+		session, err := tunnel.NewServerSession(conn)
+		if err != nil {
+			conn.Close()
+			return
+		}
+
+		cs, err := session.Accept()
+		if err != nil {
+			conn.Close()
+			return
+		}
+		protocol.ReadRequest(cs)
+		protocol.WriteResponse(cs, &protocol.TunnelResponse{Success: true, Port: 12345})
+		cs.Close()
+
+		time.Sleep(100 * time.Millisecond)
+		conn.Write([]byte{0})
+		conn.Close()
+	})
+
+	err := runRawClient(addr, 22, protocol.ProtoTCP)
+	if err == nil {
+		t.Fatal("expected unexpected session accept failure")
+	}
+	if !strings.Contains(err.Error(), "accept") {
+		t.Fatalf("error = %q, want accept context", err)
+	}
+}
+
 func TestRunRawClientUDPPath(t *testing.T) {
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
@@ -1339,6 +1609,45 @@ func TestHandleTCPStreamDialError(t *testing.T) {
 	}
 }
 
+func TestHandleTCPStreamReturnsWhenRemoteCloses(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer ln.Close()
+
+	localAccepted := make(chan net.Conn, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err == nil {
+			localAccepted <- conn
+		}
+	}()
+
+	clientStream, serverStream := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		handleTCPStream(serverStream, ln.Addr().String())
+		close(done)
+	}()
+
+	var local net.Conn
+	select {
+	case local = <-localAccepted:
+		defer local.Close()
+	case <-time.After(2 * time.Second):
+		t.Fatal("local TCP connection was not accepted")
+	}
+
+	clientStream.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleTCPStream did not return after remote close")
+	}
+}
+
 func TestHandleUDPStream(t *testing.T) {
 	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
 	if err != nil {
@@ -1451,6 +1760,29 @@ func TestHandleUDPStreamDialError(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("handleUDPStream did not return on dial failure")
+	}
+}
+
+func TestHandleUDPStreamReturnsWhenRemoteCloses(t *testing.T) {
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer udpConn.Close()
+
+	clientStream, serverStream := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		handleUDPStream(serverStream, udpConn.LocalAddr().String())
+		close(done)
+	}()
+
+	clientStream.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("handleUDPStream did not return after remote close")
 	}
 }
 

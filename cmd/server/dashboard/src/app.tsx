@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react'
 
 const pollIntervalMs = 3000
+const requestTimeoutMs = 10000
 
 interface TunnelBase {
   endpoint: string
@@ -156,6 +157,7 @@ function App() {
     let timeoutId: number | undefined
     let controller: AbortController | null = null
     let fetchAgainWhenSettled = false
+    let requestTimedOut = false
 
     const schedule = () => {
       if (!stopped && !document.hidden) {
@@ -167,6 +169,11 @@ function App() {
       if (stopped || document.hidden || controller !== null) return
 
       controller = new AbortController()
+      requestTimedOut = false
+      const requestTimeoutId = window.setTimeout(() => {
+        requestTimedOut = true
+        controller?.abort()
+      }, requestTimeoutMs)
       try {
         const payload = await fetchJSON('/api/tunnels', controller.signal)
         const tunnels = parseTunnelsResponse(payload)
@@ -179,7 +186,7 @@ function App() {
           })
         }
       } catch (error) {
-        if (!stopped && !isAbortError(error)) {
+        if (!stopped && (requestTimedOut || !isAbortError(error))) {
           setTunnelsState((current) => ({
             ...current,
             failed: true,
@@ -187,6 +194,7 @@ function App() {
           }))
         }
       } finally {
+        window.clearTimeout(requestTimeoutId)
         controller = null
         if (!stopped) {
           if (fetchAgainWhenSettled && !document.hidden) {

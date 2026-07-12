@@ -26,6 +26,22 @@ import (
 
 var noopCheckUpdate = func(string) string { return "" }
 
+type tunnelListStub []tunnel.TunnelInfo
+
+func (s tunnelListStub) ListTunnels() []tunnel.TunnelInfo {
+	return s
+}
+
+type fixedPortAllocator struct {
+	port int
+}
+
+func (a fixedPortAllocator) Allocate() (int, error) {
+	return a.port, nil
+}
+
+func (fixedPortAllocator) Release(int) {}
+
 // freePort finds an available TCP port by binding to :0 and returning
 // the port the OS assigned. This avoids hardcoded ports that may be
 // occupied in CI.
@@ -659,8 +675,8 @@ func TestStartPublicServerHTTPS(t *testing.T) {
 			req.Host = "ratatosk.localhost"
 			w := httptest.NewRecorder()
 			handler.ServeHTTP(w, req)
-			if w.Code != http.StatusMovedPermanently {
-				t.Fatalf("redirect status = %d, want %d", w.Code, http.StatusMovedPermanently)
+			if w.Code != http.StatusPermanentRedirect {
+				t.Fatalf("redirect status = %d, want %d", w.Code, http.StatusPermanentRedirect)
 			}
 			if location := w.Header().Get("Location"); location != "https://ratatosk.localhost/docs?a=1" {
 				t.Fatalf("Location = %q, want %q", location, "https://ratatosk.localhost/docs?a=1")
@@ -741,6 +757,22 @@ func TestStartPublicServerHTTPSReturnsServeTLSError(t *testing.T) {
 
 	if err := <-errs; !errors.Is(err, wantErr) {
 		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+}
+
+func TestHTTPSRedirectUsesConfiguredDomainAndPort(t *testing.T) {
+	handler := httpsRedirectHandler(&config.ServerConfig{BaseDomain: "tunnel.example.com", PublicPort: 8443})
+	request := httptest.NewRequest(http.MethodGet, "http://attacker.example/path?q=1", nil)
+	request.Host = "attacker.example"
+	response := httptest.NewRecorder()
+
+	handler.ServeHTTP(response, request)
+
+	if response.Code != http.StatusPermanentRedirect {
+		t.Fatalf("status = %d, want 308", response.Code)
+	}
+	if location := response.Header().Get("Location"); location != "https://tunnel.example.com:8443/path?q=1" {
+		t.Fatalf("Location = %q", location)
 	}
 }
 
@@ -1069,6 +1101,200 @@ func TestHTTPProxySingleRequest(t *testing.T) {
 	}
 }
 
+func TestHTTPProxyStripsTunnelCredentialsAndSpoofedForwardingHeaders(t *testing.T) {
+	type receivedHeaders struct {
+		authorization   string
+		forwarded       string
+		forwardedFor    string
+		forwardedHost   string
+		forwardedProto  string
+		connectionValue string
+		removedValue    string
+	}
+	received := make(chan receivedHeaders, 1)
+	local := newLoopbackServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		received <- receivedHeaders{
+			authorization:   r.Header.Get("Authorization"),
+			forwarded:       r.Header.Get("Forwarded"),
+			forwardedFor:    r.Header.Get("X-Forwarded-For"),
+			forwardedHost:   r.Header.Get("X-Forwarded-Host"),
+			forwardedProto:  r.Header.Get("X-Forwarded-Proto"),
+			connectionValue: r.Header.Get("Connection"),
+			removedValue:    r.Header.Get("X-Remove-Me"),
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	defer local.Close()
+
+	setupTunnelWithAuth(t, "secure-headers", local.Listener.Addr().String(), "admin:secret")
+	proxyAddr := startProxyServer(t)
+	req, err := http.NewRequest(http.MethodGet, "http://"+proxyAddr+"/", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	req.Host = "secure-headers.localhost:8080"
+	req.SetBasicAuth("admin", "secret")
+	req.Header.Set("X-Forwarded-For", "203.0.113.10")
+	req.Header.Set("X-Forwarded-Host", "attacker.example")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	req.Header.Set("Forwarded", "for=attacker.example")
+	req.Header.Set("Connection", "X-Remove-Me")
+	req.Header.Set("X-Remove-Me", "spoofed")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("Do: %v", err)
+	}
+	resp.Body.Close()
+
+	got := <-received
+	if got.authorization != "" {
+		t.Fatalf("local service received tunnel Authorization header %q", got.authorization)
+	}
+	if got.forwardedFor == "203.0.113.10" {
+		t.Fatal("local service received spoofed X-Forwarded-For")
+	}
+	if got.forwardedHost != "secure-headers.localhost:8080" {
+		t.Fatalf("X-Forwarded-Host = %q", got.forwardedHost)
+	}
+	if got.forwardedProto != "http" {
+		t.Fatalf("X-Forwarded-Proto = %q", got.forwardedProto)
+	}
+	if strings.Contains(got.forwarded, "attacker.example") {
+		t.Fatalf("Forwarded = %q, contains spoofed value", got.forwarded)
+	}
+	if got.connectionValue != "" || got.removedValue != "" {
+		t.Fatalf("hop-by-hop headers reached local service: Connection=%q X-Remove-Me=%q", got.connectionValue, got.removedValue)
+	}
+}
+
+func TestHTTPProxyUpgradeBidirectional(t *testing.T) {
+	localLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	t.Cleanup(func() { localLn.Close() })
+
+	go func() {
+		conn, acceptErr := localLn.Accept()
+		if acceptErr != nil {
+			return
+		}
+		defer conn.Close()
+		reader := bufio.NewReader(conn)
+		request, readErr := http.ReadRequest(reader)
+		if readErr != nil {
+			return
+		}
+		request.Body.Close()
+		fmt.Fprint(conn, "HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: ratatosk-test\r\n\r\n")
+		payload := make([]byte, 4)
+		if _, readErr := io.ReadFull(reader, payload); readErr == nil {
+			conn.Write(bytes.ToUpper(payload))
+		}
+	}()
+
+	setupTunnel(t, "upgrade", localLn.Addr().String())
+	proxyAddr := startProxyServer(t)
+	conn, err := net.DialTimeout("tcp", proxyAddr, 2*time.Second)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer conn.Close()
+	conn.SetDeadline(time.Now().Add(5 * time.Second))
+
+	fmt.Fprint(conn, "GET / HTTP/1.1\r\nHost: upgrade.localhost:8080\r\nConnection: Upgrade\r\nUpgrade: ratatosk-test\r\n\r\n")
+	response, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if response.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101", response.StatusCode)
+	}
+	if _, err := conn.Write([]byte("ping")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	payload := make([]byte, 4)
+	if _, err := io.ReadFull(conn, payload); err != nil {
+		t.Fatalf("ReadFull: %v", err)
+	}
+	if string(payload) != "PING" {
+		t.Fatalf("payload = %q, want PING", payload)
+	}
+}
+
+func TestHandleConnectionRejectsMissingAndWrongToken(t *testing.T) {
+	oldCfg := cfg
+	cfg = &config.ServerConfig{ControlToken: "control-secret"}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	for _, token := range []string{"", "wrong"} {
+		t.Run(token, func(t *testing.T) {
+			clientConn, serverConn := net.Pipe()
+			defer clientConn.Close()
+			go handleConnection(serverConn)
+
+			session, err := tunnel.NewClientSession(clientConn)
+			if err != nil {
+				t.Fatalf("NewClientSession: %v", err)
+			}
+			defer session.Close()
+			stream, err := session.Open()
+			if err != nil {
+				t.Fatalf("Open: %v", err)
+			}
+			if err := protocol.WriteRequest(stream, &protocol.TunnelRequest{Protocol: protocol.ProtoHTTP, AuthToken: token}); err != nil {
+				t.Fatalf("WriteRequest: %v", err)
+			}
+			response, err := protocol.ReadResponse(stream)
+			if err != nil {
+				t.Fatalf("ReadResponse: %v", err)
+			}
+			if response.Success || response.Error != "authentication failed" {
+				t.Fatalf("response = %+v, want generic authentication failure", response)
+			}
+		})
+	}
+}
+
+func TestHandleConnectionHandshakeTimeout(t *testing.T) {
+	oldTimeout := serverHandshakeTimeout
+	serverHandshakeTimeout = 20 * time.Millisecond
+	t.Cleanup(func() { serverHandshakeTimeout = oldTimeout })
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	done := make(chan struct{})
+	go func() {
+		handleConnection(serverConn)
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handleConnection did not enforce its handshake deadline")
+	}
+}
+
+func TestStartControlPlaneRejectsInvalidTLSKeyPair(t *testing.T) {
+	oldCfg := cfg
+	cfg = &config.ServerConfig{ControlTLSEnabled: true, ControlTLSCertFile: "missing-cert.pem", ControlTLSKeyFile: "missing-key.pem"}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	called := false
+	err := startControlPlane(make(chan struct{}), func(string, string) (net.Listener, error) {
+		called = true
+		return nil, nil
+	})
+	if err == nil {
+		t.Fatal("expected invalid control TLS key pair error")
+	}
+	if called {
+		t.Fatal("listener opened before TLS key pair was validated")
+	}
+}
+
 // TestHTTPProxySequentialRequests reproduces the "stays loading" bug:
 // after the first request, the hijacked connection is stuck in io.Copy
 // and the browser's second request (for JS/CSS) hangs until timeout.
@@ -1243,6 +1469,68 @@ func TestAdminAPITunnels(t *testing.T) {
 	}
 }
 
+func TestAdminAPITunnelEndpointsUseServerConfig(t *testing.T) {
+	oldCfg := cfg
+	cfg = &config.ServerConfig{
+		BaseDomain: "tunnels.example.test",
+		PublicPort: 8443,
+		TLSEnabled: true,
+	}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	connectedAt := time.Date(2026, time.July, 11, 12, 0, 0, 0, time.UTC)
+	handler := newAdminHandlerFS(tunnelListStub{
+		{Subdomain: "brisk-oak", Protocol: protocol.ProtoHTTP, ConnectedAt: connectedAt},
+		{Protocol: protocol.ProtoTCP, PublicPort: 12000, ConnectedAt: connectedAt},
+		{Protocol: protocol.ProtoUDP, PublicPort: 12001, ConnectedAt: connectedAt},
+	}, fstest.MapFS{}, "dev", noopCheckUpdate, cfg)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/tunnels", nil)
+	w := httptest.NewRecorder()
+	handler.ServeHTTP(w, req)
+
+	var body struct {
+		Tunnels []struct {
+			Protocol   string  `json:"protocol"`
+			Subdomain  *string `json:"subdomain"`
+			PublicPort *int    `json:"public_port"`
+			Endpoint   string  `json:"endpoint"`
+		} `json:"tunnels"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+
+	wantEndpoints := map[string]string{
+		protocol.ProtoHTTP: "https://brisk-oak.tunnels.example.test:8443",
+		protocol.ProtoTCP:  "tunnels.example.test:12000",
+		protocol.ProtoUDP:  "tunnels.example.test:12001",
+	}
+	if len(body.Tunnels) != len(wantEndpoints) {
+		t.Fatalf("tunnels = %d, want %d", len(body.Tunnels), len(wantEndpoints))
+	}
+	for _, tunnel := range body.Tunnels {
+		if tunnel.Endpoint != wantEndpoints[tunnel.Protocol] {
+			t.Errorf("%s endpoint = %q, want %q", tunnel.Protocol, tunnel.Endpoint, wantEndpoints[tunnel.Protocol])
+		}
+		if tunnel.Protocol == protocol.ProtoHTTP {
+			if tunnel.Subdomain == nil || *tunnel.Subdomain == "" {
+				t.Error("HTTP tunnel is missing subdomain")
+			}
+			if tunnel.PublicPort != nil {
+				t.Error("HTTP tunnel unexpectedly includes public_port")
+			}
+		} else {
+			if tunnel.PublicPort == nil || *tunnel.PublicPort == 0 {
+				t.Errorf("%s tunnel is missing public_port", tunnel.Protocol)
+			}
+			if tunnel.Subdomain != nil {
+				t.Errorf("%s tunnel unexpectedly includes subdomain", tunnel.Protocol)
+			}
+		}
+	}
+}
+
 func TestAdminDashboardFallback(t *testing.T) {
 	handler := newAdminHandler(registry)
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -1256,7 +1544,7 @@ func TestAdminDashboardFallback(t *testing.T) {
 }
 
 func TestAdminDashboardSubErrorFallback(t *testing.T) {
-	handler := newAdminHandlerFS(registry, brokenFS{}, "dev", noopCheckUpdate)
+	handler := newAdminHandlerFS(registry, brokenFS{}, "dev", noopCheckUpdate, cfg)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -1277,7 +1565,7 @@ func TestAdminDashboardEmbeddedFS(t *testing.T) {
 		"dashboard/dist/assets/app.css": {Data: []byte("body { color: red; }")},
 		"dashboard/dist/favicon.svg":    {Data: []byte("<svg></svg>")},
 		"dashboard/dist/icons.svg":      {Data: []byte("<svg></svg>")},
-	}, "dev", noopCheckUpdate)
+	}, "dev", noopCheckUpdate, cfg)
 
 	t.Run("root", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
@@ -1309,7 +1597,7 @@ func TestAdminDashboardEmbeddedFS(t *testing.T) {
 func TestAdminDashboardMissingIndexFallback(t *testing.T) {
 	handler := newAdminHandlerFS(registry, fstest.MapFS{
 		"dashboard/dist/assets/app.js": {Data: []byte("console.log('ok')")},
-	}, "dev", noopCheckUpdate)
+	}, "dev", noopCheckUpdate, cfg)
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	w := httptest.NewRecorder()
@@ -2264,8 +2552,8 @@ func TestHandleTCPTunnelAllocationFailure(t *testing.T) {
 	if resp.Success {
 		t.Fatal("expected allocation failure")
 	}
-	if !strings.Contains(resp.Error, "port allocation failed") {
-		t.Fatalf("error = %q, want allocation failure", resp.Error)
+	if resp.Error != "unable to create tunnel" {
+		t.Fatalf("error = %q, want generic tunnel failure", resp.Error)
 	}
 
 	select {
@@ -2304,8 +2592,8 @@ func TestHandleTCPTunnelListenFailure(t *testing.T) {
 	if resp.Success {
 		t.Fatal("expected listen failure")
 	}
-	if !strings.Contains(resp.Error, "failed to listen on port") {
-		t.Fatalf("error = %q, want listen failure", resp.Error)
+	if resp.Error != "unable to create tunnel" {
+		t.Fatalf("error = %q, want generic tunnel failure", resp.Error)
 	}
 
 	select {
@@ -2373,8 +2661,8 @@ func TestHandleUDPTunnelAllocationFailure(t *testing.T) {
 	if resp.Success {
 		t.Fatal("expected allocation failure")
 	}
-	if !strings.Contains(resp.Error, "port allocation failed") {
-		t.Fatalf("error = %q, want allocation failure", resp.Error)
+	if resp.Error != "unable to create tunnel" {
+		t.Fatalf("error = %q, want generic tunnel failure", resp.Error)
 	}
 
 	select {
@@ -2413,8 +2701,8 @@ func TestHandleUDPTunnelResolveFailure(t *testing.T) {
 	if resp.Success {
 		t.Fatal("expected resolve failure")
 	}
-	if !strings.Contains(resp.Error, "failed to resolve UDP address") {
-		t.Fatalf("error = %q, want resolve failure", resp.Error)
+	if resp.Error != "unable to create tunnel" {
+		t.Fatalf("error = %q, want generic tunnel failure", resp.Error)
 	}
 
 	select {
@@ -2429,7 +2717,7 @@ func TestHandleUDPTunnelListenFailure(t *testing.T) {
 	oldResolveUDPAddr := serverResolveUDPAddr
 	oldListenUDP := serverListenUDP
 	p := freePort(t)
-	portAlloc = tunnel.NewPortAllocator(p, p+1)
+	portAlloc = fixedPortAllocator{port: p}
 	serverResolveUDPAddr = net.ResolveUDPAddr
 	serverListenUDP = net.ListenUDP
 	t.Cleanup(func() {
@@ -2460,9 +2748,8 @@ func TestHandleUDPTunnelListenFailure(t *testing.T) {
 	if resp.Success {
 		t.Fatal("expected listen failure")
 	}
-	wantErr := fmt.Sprintf("failed to listen on UDP port %d", p)
-	if !strings.Contains(resp.Error, wantErr) {
-		t.Fatalf("error = %q, want %q", resp.Error, wantErr)
+	if resp.Error != "unable to create tunnel" {
+		t.Fatalf("error = %q, want generic tunnel failure", resp.Error)
 	}
 
 	select {
@@ -2565,7 +2852,7 @@ func TestHTTPProxyNoAuthPublicTunnel(t *testing.T) {
 func TestAdminAPIVersionUpToDate(t *testing.T) {
 	handler := newAdminHandlerFS(registry, fstest.MapFS{
 		"dashboard/dist/index.html": {Data: []byte("<html></html>")},
-	}, "v1.0.0", func(string) string { return "" })
+	}, "v1.0.0", func(string) string { return "" }, cfg)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/version", nil)
 	w := httptest.NewRecorder()
@@ -2590,10 +2877,31 @@ func TestAdminAPIVersionUpToDate(t *testing.T) {
 	}
 }
 
+func TestAdminHandlerRequiresConfiguredBasicAuth(t *testing.T) {
+	serverConfig := &config.ServerConfig{AdminUsername: "admin", AdminPassword: "secret"}
+	handler := newAdminHandlerFS(registry, fstest.MapFS{
+		"dashboard/dist/index.html": {Data: []byte("<html></html>")},
+	}, "dev", noopCheckUpdate, serverConfig)
+
+	unauthorized := httptest.NewRecorder()
+	handler.ServeHTTP(unauthorized, httptest.NewRequest(http.MethodGet, "/api/tunnels", nil))
+	if unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthorized status = %d, want 401", unauthorized.Code)
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/api/tunnels", nil)
+	request.SetBasicAuth("admin", "secret")
+	authorized := httptest.NewRecorder()
+	handler.ServeHTTP(authorized, request)
+	if authorized.Code != http.StatusOK {
+		t.Fatalf("authorized status = %d, want 200", authorized.Code)
+	}
+}
+
 func TestAdminAPIVersionUpdateAvailable(t *testing.T) {
 	handler := newAdminHandlerFS(registry, fstest.MapFS{
 		"dashboard/dist/index.html": {Data: []byte("<html></html>")},
-	}, "v1.0.0", func(string) string { return "v2.0.0" })
+	}, "v1.0.0", func(string) string { return "v2.0.0" }, cfg)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/version", nil)
 	w := httptest.NewRecorder()
@@ -2626,7 +2934,7 @@ func TestAdminAPIVersionDevBuild(t *testing.T) {
 			t.Fatalf("checkUpdate received %q, want %q", v, "dev")
 		}
 		return ""
-	})
+	}, cfg)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/version", nil)
 	w := httptest.NewRecorder()
@@ -2651,7 +2959,7 @@ func TestAdminAPIVersionDevBuild(t *testing.T) {
 func TestAdminAPIVersionContentType(t *testing.T) {
 	handler := newAdminHandlerFS(registry, fstest.MapFS{
 		"dashboard/dist/index.html": {Data: []byte("<html></html>")},
-	}, "v1.0.0", noopCheckUpdate)
+	}, "v1.0.0", noopCheckUpdate, cfg)
 
 	req := httptest.NewRequest(http.MethodGet, "/api/version", nil)
 	w := httptest.NewRecorder()

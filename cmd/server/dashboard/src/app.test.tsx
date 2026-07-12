@@ -1,10 +1,11 @@
-import { cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import App from './app'
 
 afterEach(() => {
   cleanup()
   vi.restoreAllMocks()
+  vi.useRealTimers()
 })
 
 describe('dashboard', () => {
@@ -74,6 +75,34 @@ describe('dashboard', () => {
     render(<App />)
 
     expect(await screen.findByRole('alert')).toHaveTextContent(
+      'Unable to load tunnels',
+    )
+  })
+
+  it('aborts a hung tunnel request and continues with an error state', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: RequestInfo | URL, init?: RequestInit) => {
+        if (String(input) === '/api/version') {
+          return Promise.resolve(
+            Response.json({ version: 'dev', update_available: false }),
+          )
+        }
+        return new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            reject(new DOMException('aborted', 'AbortError'))
+          })
+        })
+      }),
+    )
+
+    render(<App />)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000)
+    })
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
       'Unable to load tunnels',
     )
   })

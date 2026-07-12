@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"text/template"
@@ -11,6 +12,30 @@ import (
 	"github.com/charmbracelet/huh"
 	"github.com/spf13/viper"
 )
+
+func TestWriteFileAtomicEnforcesPermissionsWhenOverwriting(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ratatosk.yaml")
+	if err := os.WriteFile(path, []byte("old"), 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if err := writeFileAtomic(path, []byte("new"), 0o600); err != nil {
+		t.Fatalf("writeFileAtomic: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("Stat: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("mode = %o, want 600", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile: %v", err)
+	}
+	if string(data) != "new" {
+		t.Fatalf("content = %q, want new", data)
+	}
+}
 
 func TestValidateDomain(t *testing.T) {
 	tests := []struct {
