@@ -2,21 +2,57 @@ package inspector
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net"
 	"net/http"
+	"sync"
+	"time"
 
 	"ratatosk/internal/redact"
 )
 
 var fallbackPorts = []int{4040, 5050, 6060, 7070, 8080, 0}
 
+// Server is a running inspector HTTP server.
+type Server struct {
+	Addr      string
+	server    *http.Server
+	listener  net.Listener
+	done      chan struct{}
+	closeOnce sync.Once
+	closeErr  error
+}
+
+// Close stops the inspector and releases its listener.
+func (s *Server) Close() error {
+	if s == nil {
+		return nil
+	}
+	s.closeOnce.Do(func() {
+		if s.listener != nil {
+			s.closeErr = s.listener.Close()
+		}
+		if s.server != nil {
+			s.closeErr = errors.Join(s.closeErr, s.server.Close())
+		}
+		if errors.Is(s.closeErr, http.ErrServerClosed) || errors.Is(s.closeErr, net.ErrClosed) {
+			s.closeErr = nil
+		}
+		if s.done != nil {
+			<-s.done
+		}
+	})
+	return s.closeErr
+}
+
 // StartServer starts the inspector web UI on the first available port.
 // It returns the bound address (e.g. "127.0.0.1:4040") or an error if
 // no port could be bound. The host parameter controls which interface to
 // bind to (e.g. "127.0.0.1" for localhost only, "0.0.0.0" for all interfaces).
-func StartServer(logger *Logger, host string) (string, error) {
+func StartServer(logger *Logger, host string) (*Server, error) {
 	var ln net.Listener
 	var err error
 	for _, port := range fallbackPorts {
@@ -27,7 +63,7 @@ func StartServer(logger *Logger, host string) (string, error) {
 		}
 	}
 	if ln == nil {
-		return "", fmt.Errorf("inspector: failed to bind on any port: %w", err)
+		return nil, fmt.Errorf("inspector: failed to bind on any port: %w", err)
 	}
 
 	mux := http.NewServeMux()
@@ -43,17 +79,32 @@ func StartServer(logger *Logger, host string) (string, error) {
 				entries[i].RespBody = redact.String(entries[i].RespBody)
 			}
 		}
-		json.NewEncoder(w).Encode(entries)
+		if err := json.NewEncoder(w).Encode(entries); err != nil {
+			slog.Error("failed to write inspector logs", "error", err)
+		}
 	})
 
 	mux.HandleFunc("GET /", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		io.WriteString(w, inspectorHTML)
+		if _, err := io.WriteString(w, inspectorHTML); err != nil {
+			slog.Error("failed to write inspector page", "error", err)
+		}
 	})
 
-	go http.Serve(ln, mux)
+	server := &http.Server{
+		Handler:           mux,
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       30 * time.Second,
+	}
+	handle := &Server{Addr: ln.Addr().String(), server: server, listener: ln, done: make(chan struct{})}
+	go func() {
+		defer close(handle.done)
+		if err := server.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			slog.Error("inspector server stopped", "error", err)
+		}
+	}()
 
-	return ln.Addr().String(), nil
+	return handle, nil
 }
 
 const inspectorHTML = `<!DOCTYPE html>

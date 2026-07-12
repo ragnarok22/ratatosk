@@ -1,19 +1,28 @@
 package updater
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func checksumFile(assetName, payload string) string {
+	sum := sha256.Sum256([]byte(payload))
+	return fmt.Sprintf("%x  %s\n", sum, assetName)
+}
 
 func TestCompareVersions(t *testing.T) {
 	tests := []struct {
@@ -97,6 +106,21 @@ func TestBuildAssetURL(t *testing.T) {
 	}
 	if url != expected {
 		t.Errorf("buildAssetURL(\"v1.2.3\") =\n  %s\nwant\n  %s", url, expected)
+	}
+}
+
+func TestCheckUpdateRedirectRejectsUntrustedHosts(t *testing.T) {
+	req, err := http.NewRequest(http.MethodGet, "https://attacker.example/update", nil)
+	if err != nil {
+		t.Fatalf("NewRequest: %v", err)
+	}
+	if err := checkUpdateRedirect(req, nil); err == nil {
+		t.Fatal("untrusted update redirect was accepted")
+	}
+
+	req.URL, _ = url.Parse("https://objects.githubusercontent.com/release")
+	if err := checkUpdateRedirect(req, nil); err != nil {
+		t.Fatalf("trusted GitHub redirect rejected: %v", err)
 	}
 }
 
@@ -275,6 +299,41 @@ func TestCheckForUpdateUsesCache(t *testing.T) {
 	}
 }
 
+func TestCheckForUpdateConcurrentCallsShareRefresh(t *testing.T) {
+	stubCache(t)
+	oldFetchLatest := updaterFetchLatest
+	t.Cleanup(func() { updaterFetchLatest = oldFetchLatest })
+
+	var fetchCount atomic.Int32
+	updaterFetchLatest = func(*http.Client) (string, error) {
+		fetchCount.Add(1)
+		time.Sleep(10 * time.Millisecond)
+		return "v2.0.0", nil
+	}
+
+	const callers = 20
+	var wg sync.WaitGroup
+	results := make(chan string, callers)
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- CheckForUpdate("v1.0.0")
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	for result := range results {
+		if result != "v2.0.0" {
+			t.Fatalf("result = %q, want v2.0.0", result)
+		}
+	}
+	if got := fetchCount.Load(); got != 1 {
+		t.Fatalf("fetch count = %d, want 1", got)
+	}
+}
+
 func TestCheckForUpdateCacheExpired(t *testing.T) {
 	stubCache(t)
 	oldFetchLatest := updaterFetchLatest
@@ -427,6 +486,22 @@ func TestUpdateCLIUpToDate(t *testing.T) {
 	}))
 	defer srv.Close()
 	defer stubTransport(t, srv)()
+
+	if err := UpdateCLI("v1.0.0"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestUpdateCLIUsesForegroundTimeout(t *testing.T) {
+	oldFetchLatest := updaterFetchLatest
+	t.Cleanup(func() { updaterFetchLatest = oldFetchLatest })
+
+	updaterFetchLatest = func(client *http.Client) (string, error) {
+		if client.Timeout != foregroundUpdateTimeout {
+			t.Fatalf("client timeout = %s, want %s", client.Timeout, foregroundUpdateTimeout)
+		}
+		return "v1.0.0", nil
+	}
 
 	if err := UpdateCLI("v1.0.0"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -676,10 +751,15 @@ func TestUpdateCLIApplyError(t *testing.T) {
 	updaterFetchLatest = func(*http.Client) (string, error) { return "v2.0.0", nil }
 	updaterExecutable = func() (string, error) { return "/tmp/ratatosk", nil }
 	updaterEvalSymlinks = func(string) (string, error) { return "/tmp/ratatosk", nil }
-	updaterHTTPGet = func(string) (*http.Response, error) {
+	assetName := filepath.Base(buildAssetURL("v2.0.0"))
+	updaterHTTPGet = func(url string) (*http.Response, error) {
+		body := "payload"
+		if url == buildChecksumURL("v2.0.0") {
+			body = checksumFile(assetName, "payload")
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader("payload")),
+			Body:       io.NopCloser(strings.NewReader(body)),
 		}, nil
 	}
 	updaterApplyUpdate = func(r io.Reader) error {
@@ -720,10 +800,15 @@ func TestUpdateCLISuccess(t *testing.T) {
 	updaterFetchLatest = func(*http.Client) (string, error) { return "v2.0.0", nil }
 	updaterExecutable = func() (string, error) { return "/tmp/ratatosk", nil }
 	updaterEvalSymlinks = func(string) (string, error) { return "/tmp/ratatosk", nil }
-	updaterHTTPGet = func(string) (*http.Response, error) {
+	assetName := filepath.Base(buildAssetURL("v2.0.0"))
+	updaterHTTPGet = func(url string) (*http.Response, error) {
+		body := "payload"
+		if url == buildChecksumURL("v2.0.0") {
+			body = checksumFile(assetName, "payload")
+		}
 		return &http.Response{
 			StatusCode: http.StatusOK,
-			Body:       io.NopCloser(strings.NewReader("payload")),
+			Body:       io.NopCloser(strings.NewReader(body)),
 		}, nil
 	}
 	updaterApplyUpdate = func(r io.Reader) error {
@@ -737,5 +822,86 @@ func TestUpdateCLISuccess(t *testing.T) {
 	}
 	if !applied {
 		t.Fatal("update payload was not applied")
+	}
+}
+
+func TestUpdateCLIRejectsOversizedDownload(t *testing.T) {
+	oldFetchLatest := updaterFetchLatest
+	oldExecutable := updaterExecutable
+	oldEvalSymlinks := updaterEvalSymlinks
+	oldHTTPGet := updaterHTTPGet
+	oldApplyUpdate := updaterApplyUpdate
+	t.Cleanup(func() {
+		updaterFetchLatest = oldFetchLatest
+		updaterExecutable = oldExecutable
+		updaterEvalSymlinks = oldEvalSymlinks
+		updaterHTTPGet = oldHTTPGet
+		updaterApplyUpdate = oldApplyUpdate
+	})
+
+	updaterFetchLatest = func(*http.Client) (string, error) { return "v2.0.0", nil }
+	updaterExecutable = func() (string, error) { return "/tmp/ratatosk", nil }
+	updaterEvalSymlinks = func(string) (string, error) { return "/tmp/ratatosk", nil }
+	updaterHTTPGet = func(string) (*http.Response, error) {
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			ContentLength: maxUpdateSize + 1,
+			Body:          io.NopCloser(strings.NewReader("payload")),
+		}, nil
+	}
+	updaterApplyUpdate = func(io.Reader) error {
+		t.Fatal("oversized update must not be applied")
+		return nil
+	}
+
+	err := UpdateCLI("v1.0.0")
+	if err == nil || !strings.Contains(err.Error(), "exceeds maximum size") {
+		t.Fatalf("error = %v, want maximum size error", err)
+	}
+}
+
+func TestUpdateCLIRejectsChecksumMismatch(t *testing.T) {
+	oldFetchLatest := updaterFetchLatest
+	oldExecutable := updaterExecutable
+	oldEvalSymlinks := updaterEvalSymlinks
+	oldHTTPGet := updaterHTTPGet
+	oldApplyUpdate := updaterApplyUpdate
+	t.Cleanup(func() {
+		updaterFetchLatest = oldFetchLatest
+		updaterExecutable = oldExecutable
+		updaterEvalSymlinks = oldEvalSymlinks
+		updaterHTTPGet = oldHTTPGet
+		updaterApplyUpdate = oldApplyUpdate
+	})
+
+	updaterFetchLatest = func(*http.Client) (string, error) { return "v2.0.0", nil }
+	updaterExecutable = func() (string, error) { return "/tmp/ratatosk", nil }
+	updaterEvalSymlinks = func(string) (string, error) { return "/tmp/ratatosk", nil }
+	assetName := filepath.Base(buildAssetURL("v2.0.0"))
+	updaterHTTPGet = func(url string) (*http.Response, error) {
+		body := "payload"
+		if url == buildChecksumURL("v2.0.0") {
+			body = checksumFile(assetName, "different payload")
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(body)),
+		}, nil
+	}
+	updaterApplyUpdate = func(io.Reader) error {
+		t.Fatal("unverified update must not be applied")
+		return nil
+	}
+
+	err := UpdateCLI("v1.0.0")
+	if err == nil || !strings.Contains(err.Error(), "checksum mismatch") {
+		t.Fatalf("error = %v, want checksum mismatch", err)
+	}
+}
+
+func TestReadAtMostRejectsUnknownLengthOverflow(t *testing.T) {
+	_, err := readAtMost(strings.NewReader("12345"), 4)
+	if err == nil || !strings.Contains(err.Error(), "exceeds maximum size") {
+		t.Fatalf("error = %v, want maximum size error", err)
 	}
 }

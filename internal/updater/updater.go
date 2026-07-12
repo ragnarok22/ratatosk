@@ -1,15 +1,20 @@
 package updater
 
 import (
+	"bytes"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/minio/selfupdate"
@@ -17,6 +22,12 @@ import (
 
 const repoOwner = "ragnarok22"
 const repoName = "ratatosk"
+
+const (
+	foregroundUpdateTimeout = 2 * time.Minute
+	maxUpdateSize           = int64(128 << 20)
+	maxChecksumSize         = int64(1 << 20)
+)
 
 type githubRelease struct {
 	TagName string `json:"tag_name"`
@@ -26,11 +37,24 @@ var (
 	updaterFetchLatest  = fetchLatestVersion
 	updaterExecutable   = os.Executable
 	updaterEvalSymlinks = filepath.EvalSymlinks
-	updaterHTTPGet      = http.Get
+	foregroundClient    = &http.Client{Timeout: foregroundUpdateTimeout, CheckRedirect: checkUpdateRedirect}
+	updaterHTTPGet      = foregroundClient.Get
 	updaterApplyUpdate  = func(r io.Reader) error {
 		return selfupdate.Apply(r, selfupdate.Options{})
 	}
 )
+
+func checkUpdateRedirect(req *http.Request, _ []*http.Request) error {
+	if req.URL.Scheme != "https" || !trustedUpdateHost(req.URL) {
+		return fmt.Errorf("refusing update redirect to %s", req.URL.Redacted())
+	}
+	return nil
+}
+
+func trustedUpdateHost(target *url.URL) bool {
+	host := strings.ToLower(target.Hostname())
+	return host == "github.com" || host == "objects.githubusercontent.com" || strings.HasSuffix(host, ".githubusercontent.com")
+}
 
 // isHomebrewPath reports whether the given executable path belongs to a
 // Homebrew (or Linuxbrew) installation.
@@ -83,14 +107,61 @@ func parseVersion(v string) ([3]int, error) {
 // buildAssetURL returns the GitHub release download URL for the given tag
 // and the current OS/architecture.
 func buildAssetURL(tag string) string {
+	return fmt.Sprintf(
+		"https://github.com/%s/%s/releases/download/%s/%s",
+		repoOwner, repoName, tag, buildAssetName(),
+	)
+}
+
+func buildAssetName() string {
 	ext := ""
 	if runtime.GOOS == "windows" {
 		ext = ".exe"
 	}
+	return fmt.Sprintf("ratatosk-cli-%s-%s%s", runtime.GOOS, runtime.GOARCH, ext)
+}
+
+func buildChecksumURL(tag string) string {
 	return fmt.Sprintf(
-		"https://github.com/%s/%s/releases/download/%s/ratatosk-cli-%s-%s%s",
-		repoOwner, repoName, tag, runtime.GOOS, runtime.GOARCH, ext,
+		"https://github.com/%s/%s/releases/download/%s/checksums.txt",
+		repoOwner, repoName, tag,
 	)
+}
+
+func readAtMost(r io.Reader, max int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, max+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > max {
+		return nil, fmt.Errorf("download exceeds maximum size of %d bytes", max)
+	}
+	return data, nil
+}
+
+func readResponseAtMost(resp *http.Response, max int64) ([]byte, error) {
+	if resp.ContentLength > max {
+		return nil, fmt.Errorf("download exceeds maximum size of %d bytes", max)
+	}
+	return readAtMost(resp.Body, max)
+}
+
+func checksumForAsset(data []byte, assetName string) ([sha256.Size]byte, error) {
+	for _, line := range strings.Split(string(data), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) != 2 || strings.TrimPrefix(fields[1], "*") != assetName {
+			continue
+		}
+
+		decoded, err := hex.DecodeString(fields[0])
+		if err != nil || len(decoded) != sha256.Size {
+			return [sha256.Size]byte{}, fmt.Errorf("invalid SHA-256 checksum for %s", assetName)
+		}
+		var checksum [sha256.Size]byte
+		copy(checksum[:], decoded)
+		return checksum, nil
+	}
+	return [sha256.Size]byte{}, fmt.Errorf("SHA-256 checksum for %s not found", assetName)
 }
 
 // fetchLatestVersion queries the GitHub API for the latest release tag.
@@ -143,7 +214,7 @@ func UpdateCLI(currentVersion string) error {
 		return nil
 	}
 
-	latest, err := updaterFetchLatest(http.DefaultClient)
+	latest, err := updaterFetchLatest(foregroundClient)
 	if err != nil {
 		return err
 	}
@@ -188,7 +259,35 @@ func UpdateCLI(currentVersion string) error {
 		return fmt.Errorf("failed to download update: HTTP %d", resp.StatusCode)
 	}
 
-	if err := updaterApplyUpdate(resp.Body); err != nil {
+	payload, err := readResponseAtMost(resp, maxUpdateSize)
+	if err != nil {
+		return fmt.Errorf("failed to download update: %w", err)
+	}
+
+	checksumURL := buildChecksumURL(latest)
+	checksumResp, err := updaterHTTPGet(checksumURL)
+	if err != nil {
+		return fmt.Errorf("failed to download checksums: %w", err)
+	}
+	defer checksumResp.Body.Close()
+
+	if checksumResp.StatusCode != http.StatusOK {
+		return fmt.Errorf("failed to download checksums: HTTP %d", checksumResp.StatusCode)
+	}
+	checksumData, err := readResponseAtMost(checksumResp, maxChecksumSize)
+	if err != nil {
+		return fmt.Errorf("failed to download checksums: %w", err)
+	}
+	expectedChecksum, err := checksumForAsset(checksumData, buildAssetName())
+	if err != nil {
+		return fmt.Errorf("failed to verify update: %w", err)
+	}
+	actualChecksum := sha256.Sum256(payload)
+	if actualChecksum != expectedChecksum {
+		return fmt.Errorf("failed to verify update: SHA-256 checksum mismatch for %s", buildAssetName())
+	}
+
+	if err := updaterApplyUpdate(bytes.NewReader(payload)); err != nil {
 		return fmt.Errorf("failed to apply update: %w", err)
 	}
 
@@ -216,6 +315,7 @@ type updateCache struct {
 var (
 	updaterUserCacheDir = os.UserCacheDir
 	updaterTimeNow      = time.Now
+	updateCheckMu       sync.Mutex
 )
 
 // cacheFilePath returns the path to the update check cache file.
@@ -251,18 +351,40 @@ func writeCache(c updateCache) {
 	if err != nil {
 		return
 	}
-	if err := os.MkdirAll(filepath.Dir(path), cacheDirPerm); err != nil {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, cacheDirPerm); err != nil {
 		return
 	}
 	data, err := json.Marshal(c)
 	if err != nil {
 		return
 	}
-	_ = os.WriteFile(path, data, cacheFilePerm)
+	temp, err := os.CreateTemp(dir, ".update-check-*")
+	if err != nil {
+		return
+	}
+	tempPath := temp.Name()
+	defer os.Remove(tempPath)
+	if err := temp.Chmod(cacheFilePerm); err != nil {
+		temp.Close()
+		return
+	}
+	if _, err := temp.Write(data); err != nil {
+		temp.Close()
+		return
+	}
+	if err := temp.Sync(); err != nil {
+		temp.Close()
+		return
+	}
+	if err := temp.Close(); err != nil {
+		return
+	}
+	_ = os.Rename(tempPath, path)
 }
 
 // CheckForUpdate checks if a newer version is available on GitHub.
-// Results are cached for 24 hours to avoid hitting the API on every
+// Results are cached for checkInterval to avoid hitting the API on every
 // invocation. Returns the latest version tag if an update is available,
 // or an empty string if the current version is up to date or cannot be
 // determined.
@@ -270,6 +392,8 @@ func CheckForUpdate(currentVersion string) string {
 	if currentVersion == "dev" {
 		return ""
 	}
+	updateCheckMu.Lock()
+	defer updateCheckMu.Unlock()
 
 	now := updaterTimeNow()
 	cached := readCache()

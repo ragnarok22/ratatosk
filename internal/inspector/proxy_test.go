@@ -2,12 +2,16 @@ package inspector
 
 import (
 	"bufio"
+	"bytes"
+	"encoding/base64"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestHandleStream(t *testing.T) {
@@ -99,13 +103,19 @@ func TestHandleStreamLocalServerDown(t *testing.T) {
 		t.Fatalf("failed to read response: %v", err)
 	}
 	defer resp.Body.Close()
-	clientConn.Close()
-
-	<-done
 
 	if resp.StatusCode != http.StatusBadGateway {
 		t.Fatalf("expected 502, got %d", resp.StatusCode)
 	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read 502 body: %v", err)
+	}
+	if string(body) != "Bad Gateway\n" {
+		t.Fatalf("502 body = %q, want generic message", body)
+	}
+	clientConn.Close()
+	<-done
 }
 
 func TestHandleStreamBinaryResponse(t *testing.T) {
@@ -175,5 +185,210 @@ func TestFlattenHeaders(t *testing.T) {
 	}
 	if flat["Accept"] != "text/html, application/json" {
 		t.Errorf("unexpected Accept: %q", flat["Accept"])
+	}
+}
+
+func TestHandleStreamForwardsStreamingResponse(t *testing.T) {
+	release := make(chan struct{})
+	t.Cleanup(func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	})
+
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, "first")
+		w.(http.Flusher).Flush()
+		<-release
+		_, _ = io.WriteString(w, "second")
+	}))
+	defer local.Close()
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	done := make(chan struct{})
+	go func() {
+		HandleStream(serverConn, strings.TrimPrefix(local.URL, "http://"), NewLogger())
+		serverConn.Close()
+		close(done)
+	}()
+
+	if _, err := io.WriteString(clientConn, "GET /stream HTTP/1.1\r\nHost: example.com\r\n\r\n"); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	response := make(chan *http.Response, 1)
+	errs := make(chan error, 1)
+	go func() {
+		resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+		if err != nil {
+			errs <- err
+			return
+		}
+		response <- resp
+	}()
+
+	var resp *http.Response
+	select {
+	case resp = <-response:
+	case err := <-errs:
+		t.Fatalf("ReadResponse: %v", err)
+	case <-time.After(2 * time.Second):
+		t.Fatal("response headers were not forwarded before the streaming body completed")
+	}
+
+	close(release)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	resp.Body.Close()
+	if string(body) != "firstsecond" {
+		t.Fatalf("body = %q, want %q", body, "firstsecond")
+	}
+	<-done
+}
+
+func TestBuildTrafficLogCapsBinaryResponse(t *testing.T) {
+	body := bytes.Repeat([]byte{0xff}, maxBodyLog+1)
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/image", nil)
+	resp := &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"image/png"}}}
+
+	entry := buildTrafficLog(req, nil, resp, body, time.Now(), time.Second)
+	decoded, err := base64.StdEncoding.DecodeString(entry.RespBody)
+	if err != nil {
+		t.Fatalf("DecodeString: %v", err)
+	}
+	if len(decoded) != maxBodyLog {
+		t.Fatalf("logged binary body length = %d, want %d", len(decoded), maxBodyLog)
+	}
+}
+
+func TestHandleStreamForwardsStreamingRequest(t *testing.T) {
+	receivedPrefix := make(chan struct{})
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		prefix := make([]byte, 5)
+		if _, err := io.ReadFull(r.Body, prefix); err != nil {
+			t.Errorf("read request prefix: %v", err)
+			return
+		}
+		if string(prefix) != "first" {
+			t.Errorf("request prefix = %q, want first", prefix)
+		}
+		close(receivedPrefix)
+		rest, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read request remainder: %v", err)
+			return
+		}
+		_, _ = io.WriteString(w, string(prefix)+string(rest))
+	}))
+	defer local.Close()
+
+	logger := NewLogger()
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	done := make(chan struct{})
+	go func() {
+		HandleStream(serverConn, strings.TrimPrefix(local.URL, "http://"), logger)
+		serverConn.Close()
+		close(done)
+	}()
+
+	if _, err := io.WriteString(clientConn, "POST /stream HTTP/1.1\r\nHost: example.com\r\nContent-Length: 11\r\n\r\nfirst"); err != nil {
+		t.Fatalf("write request prefix: %v", err)
+	}
+	select {
+	case <-receivedPrefix:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request prefix was not forwarded before the full body arrived")
+	}
+	if _, err := io.WriteString(clientConn, "second"); err != nil {
+		t.Fatalf("write request remainder: %v", err)
+	}
+
+	resp, err := http.ReadResponse(bufio.NewReader(clientConn), nil)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	resp.Body.Close()
+	if string(body) != "firstsecond" {
+		t.Fatalf("response body = %q, want firstsecond", body)
+	}
+	<-done
+
+	entries := logger.Entries()
+	if len(entries) != 1 || entries[0].ReqBody != "firstsecond" {
+		t.Fatalf("logged request body = %+v, want firstsecond", entries)
+	}
+}
+
+func TestHandleStreamProxiesUpgrade(t *testing.T) {
+	local := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("response writer does not support hijacking")
+			return
+		}
+		conn, rw, err := hijacker.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		defer conn.Close()
+		_, _ = rw.WriteString("HTTP/1.1 101 Switching Protocols\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n")
+		_ = rw.Flush()
+		payload := make([]byte, 4)
+		if _, err := io.ReadFull(rw, payload); err != nil {
+			t.Errorf("read upgraded payload: %v", err)
+			return
+		}
+		_, _ = rw.Write(payload)
+		_ = rw.Flush()
+	}))
+	defer local.Close()
+
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	done := make(chan struct{})
+	go func() {
+		HandleStream(serverConn, strings.TrimPrefix(local.URL, "http://"), NewLogger())
+		serverConn.Close()
+		close(done)
+	}()
+
+	request := "GET /upgrade HTTP/1.1\r\nHost: example.com\r\nConnection: Upgrade\r\nUpgrade: echo\r\n\r\n"
+	if _, err := io.WriteString(clientConn, request); err != nil {
+		t.Fatalf("write upgrade request: %v", err)
+	}
+	reader := bufio.NewReader(clientConn)
+	resp, err := http.ReadResponse(reader, &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if resp.StatusCode != http.StatusSwitchingProtocols {
+		t.Fatalf("status = %d, want 101", resp.StatusCode)
+	}
+	if _, err := io.WriteString(clientConn, "ping"); err != nil {
+		t.Fatalf("write upgraded payload: %v", err)
+	}
+	payload := make([]byte, 4)
+	if _, err := io.ReadFull(reader, payload); err != nil {
+		t.Fatalf("read upgraded payload: %v", err)
+	}
+	if string(payload) != "ping" {
+		t.Fatalf("upgraded payload = %q, want ping", payload)
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("upgrade proxy did not finish after the local connection closed")
 	}
 }

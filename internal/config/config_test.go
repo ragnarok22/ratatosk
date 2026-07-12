@@ -14,8 +14,19 @@ func clearConfigEnv(t *testing.T) {
 	for _, key := range []string{
 		"RATATOSK_BASE_DOMAIN",
 		"RATATOSK_PUBLIC_PORT",
+		"RATATOSK_ADMIN_HOST",
 		"RATATOSK_ADMIN_PORT",
+		"RATATOSK_ADMIN_USERNAME",
+		"RATATOSK_ADMIN_PASSWORD",
+		"RATATOSK_ADMIN_TLS_ENABLED",
+		"RATATOSK_ADMIN_TLS_CERT_FILE",
+		"RATATOSK_ADMIN_TLS_KEY_FILE",
+		"RATATOSK_CONTROL_HOST",
 		"RATATOSK_CONTROL_PORT",
+		"RATATOSK_CONTROL_TOKEN",
+		"RATATOSK_CONTROL_TLS_ENABLED",
+		"RATATOSK_CONTROL_TLS_CERT_FILE",
+		"RATATOSK_CONTROL_TLS_KEY_FILE",
 		"RATATOSK_TLS_ENABLED",
 		"RATATOSK_TLS_AUTO",
 		"RATATOSK_TLS_EMAIL",
@@ -43,8 +54,14 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.PublicPort != 8080 {
 		t.Errorf("PublicPort = %d, want %d", cfg.PublicPort, 8080)
 	}
+	if cfg.AdminHost != "127.0.0.1" {
+		t.Errorf("AdminHost = %q, want %q", cfg.AdminHost, "127.0.0.1")
+	}
 	if cfg.AdminPort != 8081 {
 		t.Errorf("AdminPort = %d, want %d", cfg.AdminPort, 8081)
+	}
+	if cfg.ControlHost != "127.0.0.1" {
+		t.Errorf("ControlHost = %q, want %q", cfg.ControlHost, "127.0.0.1")
 	}
 	if cfg.ControlPort != 7000 {
 		t.Errorf("ControlPort = %d, want %d", cfg.ControlPort, 7000)
@@ -80,6 +97,17 @@ func TestLoadConfigPortRangeFromEnv(t *testing.T) {
 func TestLoadConfigFromEnv(t *testing.T) {
 	t.Setenv("RATATOSK_BASE_DOMAIN", "example.com")
 	t.Setenv("RATATOSK_PUBLIC_PORT", "443")
+	t.Setenv("RATATOSK_ADMIN_HOST", "10.0.0.2")
+	t.Setenv("RATATOSK_ADMIN_USERNAME", "admin")
+	t.Setenv("RATATOSK_ADMIN_PASSWORD", "secret")
+	t.Setenv("RATATOSK_ADMIN_TLS_ENABLED", "true")
+	t.Setenv("RATATOSK_ADMIN_TLS_CERT_FILE", "/etc/ssl/admin-cert.pem")
+	t.Setenv("RATATOSK_ADMIN_TLS_KEY_FILE", "/etc/ssl/admin-key.pem")
+	t.Setenv("RATATOSK_CONTROL_HOST", "0.0.0.0")
+	t.Setenv("RATATOSK_CONTROL_TOKEN", "control-secret")
+	t.Setenv("RATATOSK_CONTROL_TLS_ENABLED", "true")
+	t.Setenv("RATATOSK_CONTROL_TLS_CERT_FILE", "/etc/ssl/control-cert.pem")
+	t.Setenv("RATATOSK_CONTROL_TLS_KEY_FILE", "/etc/ssl/control-key.pem")
 	t.Setenv("RATATOSK_TLS_ENABLED", "true")
 	t.Setenv("RATATOSK_TLS_CERT_FILE", "/etc/ssl/cert.pem")
 	t.Setenv("RATATOSK_TLS_KEY_FILE", "/etc/ssl/key.pem")
@@ -94,6 +122,12 @@ func TestLoadConfigFromEnv(t *testing.T) {
 	}
 	if cfg.PublicPort != 443 {
 		t.Errorf("PublicPort = %d, want %d", cfg.PublicPort, 443)
+	}
+	if cfg.AdminHost != "10.0.0.2" {
+		t.Errorf("AdminHost = %q, want %q", cfg.AdminHost, "10.0.0.2")
+	}
+	if cfg.ControlHost != "0.0.0.0" {
+		t.Errorf("ControlHost = %q, want %q", cfg.ControlHost, "0.0.0.0")
 	}
 	if !cfg.TLSEnabled {
 		t.Error("TLSEnabled should be true")
@@ -255,6 +289,8 @@ func TestLoadConfigFromHomeConfigDir(t *testing.T) {
 
 	content := []byte(`base_domain: home.example
 public_port: 18080
+port_range_start: 20000
+port_range_end: 30000
 `)
 	if err := os.WriteFile(filepath.Join(configDir, "ratatosk.yaml"), content, 0644); err != nil {
 		t.Fatalf("WriteFile: %v", err)
@@ -367,27 +403,48 @@ func TestTunnelURL(t *testing.T) {
 }
 
 func TestAddrs(t *testing.T) {
-	cfg := ServerConfig{PublicPort: 443, AdminPort: 8081, ControlPort: 7000}
+	cfg := ServerConfig{
+		PublicPort:  443,
+		AdminHost:   "127.0.0.1",
+		AdminPort:   8081,
+		ControlHost: "::1",
+		ControlPort: 7000,
+	}
 	if cfg.PublicAddr() != ":443" {
 		t.Errorf("PublicAddr = %q", cfg.PublicAddr())
 	}
-	if cfg.AdminAddr() != ":8081" {
+	if cfg.AdminAddr() != "127.0.0.1:8081" {
 		t.Errorf("AdminAddr = %q", cfg.AdminAddr())
 	}
-	if cfg.ControlAddr() != ":7000" {
+	if cfg.ControlAddr() != "[::1]:7000" {
 		t.Errorf("ControlAddr = %q", cfg.ControlAddr())
 	}
 }
 
+func validServerConfig() ServerConfig {
+	return ServerConfig{
+		BaseDomain:     "localhost",
+		PublicPort:     8080,
+		AdminHost:      "127.0.0.1",
+		AdminPort:      8081,
+		ControlHost:    "127.0.0.1",
+		ControlPort:    7000,
+		PortRangeStart: 10000,
+		PortRangeEnd:   20000,
+	}
+}
+
 func TestValidateHTTPPassesWithDefaults(t *testing.T) {
-	cfg := ServerConfig{BaseDomain: "localhost"}
+	cfg := validServerConfig()
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 }
 
 func TestValidateTLSAutoAndEnabledMutuallyExclusive(t *testing.T) {
-	cfg := ServerConfig{TLSAuto: true, TLSEnabled: true}
+	cfg := validServerConfig()
+	cfg.TLSAuto = true
+	cfg.TLSEnabled = true
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected error when both tls_auto and tls_enabled are true")
@@ -398,12 +455,12 @@ func TestValidateTLSAutoAndEnabledMutuallyExclusive(t *testing.T) {
 }
 
 func TestValidateTLSAutoRequiresEmail(t *testing.T) {
-	cfg := ServerConfig{
-		BaseDomain:  "tunnel.example.com",
-		TLSAuto:     true,
-		TLSProvider: "cloudflare",
-		TLSAPIToken: "token",
-	}
+	cfg := validServerConfig()
+	cfg.BaseDomain = "tunnel.example.com"
+	cfg.PublicPort = 443
+	cfg.TLSAuto = true
+	cfg.TLSProvider = "cloudflare"
+	cfg.TLSAPIToken = "token"
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected error when tls_email is missing")
@@ -414,12 +471,12 @@ func TestValidateTLSAutoRequiresEmail(t *testing.T) {
 }
 
 func TestValidateTLSAutoRequiresProvider(t *testing.T) {
-	cfg := ServerConfig{
-		BaseDomain:  "tunnel.example.com",
-		TLSAuto:     true,
-		TLSEmail:    "admin@example.com",
-		TLSAPIToken: "token",
-	}
+	cfg := validServerConfig()
+	cfg.BaseDomain = "tunnel.example.com"
+	cfg.PublicPort = 443
+	cfg.TLSAuto = true
+	cfg.TLSEmail = "admin@example.com"
+	cfg.TLSAPIToken = "token"
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected error when tls_provider is missing")
@@ -430,12 +487,12 @@ func TestValidateTLSAutoRequiresProvider(t *testing.T) {
 }
 
 func TestValidateTLSAutoRequiresAPIToken(t *testing.T) {
-	cfg := ServerConfig{
-		BaseDomain:  "tunnel.example.com",
-		TLSAuto:     true,
-		TLSEmail:    "admin@example.com",
-		TLSProvider: "cloudflare",
-	}
+	cfg := validServerConfig()
+	cfg.BaseDomain = "tunnel.example.com"
+	cfg.PublicPort = 443
+	cfg.TLSAuto = true
+	cfg.TLSEmail = "admin@example.com"
+	cfg.TLSProvider = "cloudflare"
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected error when tls_api_token is missing")
@@ -446,13 +503,12 @@ func TestValidateTLSAutoRequiresAPIToken(t *testing.T) {
 }
 
 func TestValidateTLSAutoRejectsLocalhost(t *testing.T) {
-	cfg := ServerConfig{
-		BaseDomain:  "localhost",
-		TLSAuto:     true,
-		TLSEmail:    "admin@example.com",
-		TLSProvider: "cloudflare",
-		TLSAPIToken: "token",
-	}
+	cfg := validServerConfig()
+	cfg.PublicPort = 443
+	cfg.TLSAuto = true
+	cfg.TLSEmail = "admin@example.com"
+	cfg.TLSProvider = "cloudflare"
+	cfg.TLSAPIToken = "token"
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected error when base_domain is localhost with tls_auto")
@@ -463,7 +519,8 @@ func TestValidateTLSAutoRejectsLocalhost(t *testing.T) {
 }
 
 func TestValidateManualTLSRequiresCertAndKey(t *testing.T) {
-	cfg := ServerConfig{TLSEnabled: true}
+	cfg := validServerConfig()
+	cfg.TLSEnabled = true
 	err := cfg.Validate()
 	if err == nil {
 		t.Fatal("expected error when tls_cert_file and tls_key_file are missing")
@@ -474,25 +531,157 @@ func TestValidateManualTLSRequiresCertAndKey(t *testing.T) {
 }
 
 func TestValidateTLSAutoValid(t *testing.T) {
-	cfg := ServerConfig{
-		BaseDomain:  "tunnel.example.com",
-		TLSAuto:     true,
-		TLSEmail:    "admin@example.com",
-		TLSProvider: "cloudflare",
-		TLSAPIToken: "token",
-	}
+	cfg := validServerConfig()
+	cfg.BaseDomain = "tunnel.example.com"
+	cfg.PublicPort = 443
+	cfg.TLSAuto = true
+	cfg.TLSEmail = "admin@example.com"
+	cfg.TLSProvider = "cloudflare"
+	cfg.TLSAPIToken = "token"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
 	}
 }
 
 func TestValidateManualTLSValid(t *testing.T) {
-	cfg := ServerConfig{
-		TLSEnabled:  true,
-		TLSCertFile: "/etc/ssl/cert.pem",
-		TLSKeyFile:  "/etc/ssl/key.pem",
-	}
+	cfg := validServerConfig()
+	cfg.TLSEnabled = true
+	cfg.TLSCertFile = "/etc/ssl/cert.pem"
+	cfg.TLSKeyFile = "/etc/ssl/key.pem"
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestValidateRejectsInvalidPortsAndRanges(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*ServerConfig)
+	}{
+		{name: "negative public port", mutate: func(cfg *ServerConfig) { cfg.PublicPort = -1 }},
+		{name: "admin port above maximum", mutate: func(cfg *ServerConfig) { cfg.AdminPort = 70000 }},
+		{name: "zero control port", mutate: func(cfg *ServerConfig) { cfg.ControlPort = 0 }},
+		{name: "range is reversed", mutate: func(cfg *ServerConfig) { cfg.PortRangeStart = 20000; cfg.PortRangeEnd = 10000 }},
+		{name: "range starts below minimum", mutate: func(cfg *ServerConfig) { cfg.PortRangeStart = 0 }},
+		{name: "range ends above maximum", mutate: func(cfg *ServerConfig) { cfg.PortRangeEnd = 65536 }},
+		{name: "service ports conflict", mutate: func(cfg *ServerConfig) { cfg.AdminPort = cfg.PublicPort }},
+		{name: "public port overlaps range", mutate: func(cfg *ServerConfig) { cfg.PublicPort = 10000 }},
+		{name: "admin port overlaps range", mutate: func(cfg *ServerConfig) { cfg.AdminPort = 15000 }},
+		{name: "control port overlaps range", mutate: func(cfg *ServerConfig) { cfg.ControlPort = 19999 }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validServerConfig()
+			tt.mutate(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Errorf("Validate accepted invalid configuration: %+v", cfg)
+			}
+		})
+	}
+}
+
+func TestValidateTLSAutoRequiresPort443(t *testing.T) {
+	cfg := validServerConfig()
+	cfg.BaseDomain = "tunnel.example.com"
+	cfg.TLSAuto = true
+	cfg.TLSEmail = "admin@example.com"
+	cfg.TLSProvider = "cloudflare"
+	cfg.TLSAPIToken = "token"
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("Validate accepted tls_auto with a public port other than 443")
+	}
+}
+
+func TestValidateRejectsUnprotectedRemoteBindings(t *testing.T) {
+	base := ServerConfig{
+		BaseDomain:     "example.com",
+		PublicPort:     8080,
+		AdminHost:      "127.0.0.1",
+		AdminPort:      8081,
+		ControlHost:    "127.0.0.1",
+		ControlPort:    7000,
+		PortRangeStart: 10000,
+		PortRangeEnd:   20000,
+	}
+
+	remoteAdmin := base
+	remoteAdmin.AdminHost = "0.0.0.0"
+	if err := remoteAdmin.Validate(); err == nil {
+		t.Fatal("Validate accepted an unauthenticated remote admin binding")
+	}
+
+	remoteControl := base
+	remoteControl.ControlHost = "0.0.0.0"
+	if err := remoteControl.Validate(); err == nil {
+		t.Fatal("Validate accepted an unauthenticated plaintext remote control binding")
+	}
+}
+
+func TestValidateAcceptsProtectedRemoteBindings(t *testing.T) {
+	cfg := validServerConfig()
+	cfg.AdminHost = "0.0.0.0"
+	cfg.AdminUsername = "admin"
+	cfg.AdminPassword = "secret"
+	cfg.AdminTLSEnabled = true
+	cfg.AdminTLSCertFile = "/etc/ssl/admin-cert.pem"
+	cfg.AdminTLSKeyFile = "/etc/ssl/admin-key.pem"
+	cfg.ControlHost = "0.0.0.0"
+	cfg.ControlToken = "control-secret"
+	cfg.ControlTLSEnabled = true
+	cfg.ControlTLSCertFile = "/etc/ssl/control-cert.pem"
+	cfg.ControlTLSKeyFile = "/etc/ssl/control-key.pem"
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestValidateAdminTLSRequiresCertAndKey(t *testing.T) {
+	cfg := validServerConfig()
+	cfg.AdminTLSEnabled = true
+
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "admin_tls_cert_file") {
+		t.Fatalf("Validate error = %v, want admin TLS certificate requirement", err)
+	}
+}
+
+func TestValidateControlTLSRequiresCertAndKey(t *testing.T) {
+	cfg := validServerConfig()
+	cfg.ControlTLSEnabled = true
+
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "control_tls_cert_file") {
+		t.Fatalf("Validate error = %v, want control TLS certificate requirement", err)
+	}
+}
+
+func TestValidateRejectsInvalidDomainAndTLSProvider(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*ServerConfig)
+	}{
+		{name: "empty domain", mutate: func(cfg *ServerConfig) { cfg.BaseDomain = "" }},
+		{name: "URL is not a domain", mutate: func(cfg *ServerConfig) { cfg.BaseDomain = "https://example.com" }},
+		{name: "empty label", mutate: func(cfg *ServerConfig) { cfg.BaseDomain = "tunnel..example.com" }},
+		{name: "label starts with hyphen", mutate: func(cfg *ServerConfig) { cfg.BaseDomain = "-tunnel.example.com" }},
+		{name: "IP address", mutate: func(cfg *ServerConfig) { cfg.BaseDomain = "127.0.0.1" }},
+		{name: "unsupported TLS provider", mutate: func(cfg *ServerConfig) {
+			cfg.BaseDomain = "tunnel.example.com"
+			cfg.PublicPort = 443
+			cfg.TLSAuto = true
+			cfg.TLSEmail = "admin@example.com"
+			cfg.TLSProvider = "route53"
+			cfg.TLSAPIToken = "token"
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validServerConfig()
+			tt.mutate(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Errorf("Validate accepted invalid configuration: %+v", cfg)
+			}
+		})
 	}
 }

@@ -3,6 +3,7 @@ package tunnel
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -234,5 +235,186 @@ func TestProxyTCPConnOpenError(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("proxyTCPConn did not return when session open failed")
+	}
+}
+
+func TestProxyTCPConnReturnsWhenStreamCloses(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	serverSession, err := NewServerSession(serverConn)
+	if err != nil {
+		t.Fatalf("NewServerSession: %v", err)
+	}
+	defer serverSession.Close()
+
+	clientSession, err := NewClientSession(clientConn)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+	defer clientSession.Close()
+
+	publicConn, publicRemote := net.Pipe()
+	defer publicConn.Close()
+
+	done := make(chan struct{})
+	go func() {
+		proxyTCPConn(publicRemote, serverSession)
+		close(done)
+	}()
+
+	stream, err := clientSession.Accept()
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	stream.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxyTCPConn did not return after the yamux stream closed")
+	}
+}
+
+func TestProxyTCPConnReturnsWhenPublicConnCloses(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	serverSession, err := NewServerSession(serverConn)
+	if err != nil {
+		t.Fatalf("NewServerSession: %v", err)
+	}
+	defer serverSession.Close()
+
+	clientSession, err := NewClientSession(clientConn)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+	defer clientSession.Close()
+
+	publicConn, publicRemote := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		proxyTCPConn(publicRemote, serverSession)
+		close(done)
+	}()
+
+	stream, err := clientSession.Accept()
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	defer stream.Close()
+	publicConn.Close()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxyTCPConn did not return after the public connection closed")
+	}
+}
+
+func TestServeTCPReturnsWhenListenerCloses(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+
+	done := make(chan struct{})
+	go func() {
+		ServeTCP(context.Background(), ln, nil)
+		close(done)
+	}()
+
+	if err := ln.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeTCP did not return after its listener closed")
+	}
+}
+
+func TestProxyTCPConnPreservesHalfCloseResponse(t *testing.T) {
+	serverConn, clientConn := net.Pipe()
+	defer serverConn.Close()
+	defer clientConn.Close()
+
+	serverSession, err := NewServerSession(serverConn)
+	if err != nil {
+		t.Fatalf("NewServerSession: %v", err)
+	}
+	defer serverSession.Close()
+	clientSession, err := NewClientSession(clientConn)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+	defer clientSession.Close()
+
+	ln, err := net.ListenTCP("tcp", &net.TCPAddr{IP: net.ParseIP("127.0.0.1")})
+	if err != nil {
+		t.Fatalf("ListenTCP: %v", err)
+	}
+	defer ln.Close()
+
+	proxyDone := make(chan struct{})
+	go func() {
+		public, acceptErr := ln.AcceptTCP()
+		if acceptErr == nil {
+			proxyTCPConn(public, serverSession)
+		}
+		close(proxyDone)
+	}()
+
+	public, err := net.DialTCP("tcp", nil, ln.Addr().(*net.TCPAddr))
+	if err != nil {
+		t.Fatalf("DialTCP: %v", err)
+	}
+	defer public.Close()
+	stream, err := clientSession.Accept()
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	defer stream.Close()
+
+	serviceDone := make(chan error, 1)
+	go func() {
+		request, readErr := io.ReadAll(stream)
+		if readErr != nil {
+			serviceDone <- readErr
+			return
+		}
+		if string(request) != "request" {
+			serviceDone <- fmt.Errorf("request = %q", request)
+			return
+		}
+		_, writeErr := stream.Write([]byte("response"))
+		writeErr = errors.Join(writeErr, stream.Close())
+		serviceDone <- writeErr
+	}()
+
+	if _, err := public.Write([]byte("request")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	if err := public.CloseWrite(); err != nil {
+		t.Fatalf("CloseWrite: %v", err)
+	}
+	response, err := io.ReadAll(public)
+	if err != nil {
+		t.Fatalf("ReadAll: %v", err)
+	}
+	if string(response) != "response" {
+		t.Fatalf("response = %q, want %q", response, "response")
+	}
+	if err := <-serviceDone; err != nil {
+		t.Fatalf("service: %v", err)
+	}
+	select {
+	case <-proxyDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("proxy did not finish after both directions half-closed")
 	}
 }

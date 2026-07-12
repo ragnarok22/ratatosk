@@ -2,8 +2,10 @@ package tunnel
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -98,6 +100,52 @@ func TestRegisterOverwrite(t *testing.T) {
 	}
 }
 
+func TestRegisterIfAbsentIsAtomic(t *testing.T) {
+	r := NewRegistry()
+	const attempts = 50
+
+	sessions := make([]*yamux.Session, attempts)
+	for i := range sessions {
+		_, sessions[i] = newTestSession(t)
+	}
+
+	var successes atomic.Int32
+	var wg sync.WaitGroup
+	for _, session := range sessions {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if r.RegisterIfAbsent("shared", session, "", "http") {
+				successes.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+
+	if got := successes.Load(); got != 1 {
+		t.Fatalf("successful registrations = %d, want 1", got)
+	}
+}
+
+func TestUnregisterIfSessionPreservesReplacement(t *testing.T) {
+	r := NewRegistry()
+	_, stale := newTestSession(t)
+	_, current := newTestSession(t)
+	r.Register("sub", stale, "", "http")
+	r.Register("sub", current, "", "http")
+
+	if r.UnregisterIfSession("sub", stale) {
+		t.Fatal("UnregisterIfSession removed a replacement session")
+	}
+	got, ok := r.GetSession("sub")
+	if !ok || got != current {
+		t.Fatal("replacement session was not preserved")
+	}
+	if !r.UnregisterIfSession("sub", current) {
+		t.Fatal("UnregisterIfSession did not remove the current session")
+	}
+}
+
 func TestHasSubdomain(t *testing.T) {
 	r := NewRegistry()
 	_, session := newTestSession(t)
@@ -171,6 +219,23 @@ func TestGetEntry(t *testing.T) {
 	}
 }
 
+func TestGetEntryReturnsSnapshot(t *testing.T) {
+	r := NewRegistry()
+	_, session := newTestSession(t)
+	r.Register("snapshot", session, "admin:secret", "http")
+
+	entry, ok := r.GetEntry("snapshot")
+	if !ok {
+		t.Fatal("GetEntry returned false")
+	}
+	entry.BasicAuth = "changed"
+
+	again, _ := r.GetEntry("snapshot")
+	if again.BasicAuth != "admin:secret" {
+		t.Fatal("mutating a returned entry changed registry state")
+	}
+}
+
 func TestGetEntryNotFound(t *testing.T) {
 	r := NewRegistry()
 	_, ok := r.GetEntry("nonexistent")
@@ -233,6 +298,49 @@ func TestUnregisterPort(t *testing.T) {
 		t.Fatal("GetPortEntry returned true after UnregisterPort")
 	}
 }
+
+type closeCounter struct {
+	count atomic.Int32
+}
+
+func (c *closeCounter) Close() error {
+	c.count.Add(1)
+	return nil
+}
+
+func TestPortRegistrationAndCleanupAreIdentityAware(t *testing.T) {
+	r := NewRegistry()
+	staleCloser := &closeCounter{}
+	currentCloser := &closeCounter{}
+	stale := &TunnelEntry{Listener: staleCloser}
+	current := &TunnelEntry{Listener: currentCloser}
+
+	if !r.RegisterPortIfAbsent(12345, stale) {
+		t.Fatal("initial RegisterPortIfAbsent failed")
+	}
+	if r.RegisterPortIfAbsent(12345, current) {
+		t.Fatal("duplicate RegisterPortIfAbsent succeeded")
+	}
+	r.RegisterPort(12345, current)
+
+	if r.UnregisterPortIfEntry(12345, stale) {
+		t.Fatal("UnregisterPortIfEntry removed a replacement entry")
+	}
+	if staleCloser.count.Load() != 0 || currentCloser.count.Load() != 0 {
+		t.Fatal("stale cleanup closed a listener")
+	}
+	if !r.UnregisterPortIfEntry(12345, current) {
+		t.Fatal("UnregisterPortIfEntry did not remove the current entry")
+	}
+	if currentCloser.count.Load() != 1 {
+		t.Fatalf("current listener close count = %d, want 1", currentCloser.count.Load())
+	}
+	if _, ok := r.GetPortEntry(12345); ok {
+		t.Fatal("port remained registered")
+	}
+}
+
+var _ io.Closer = (*closeCounter)(nil)
 
 func TestGetPortEntryNotFound(t *testing.T) {
 	r := NewRegistry()

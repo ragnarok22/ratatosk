@@ -67,6 +67,28 @@ func TestLoggerEntriesReturnsCopy(t *testing.T) {
 	}
 }
 
+func TestLoggerEntriesDeepCopiesHeaders(t *testing.T) {
+	logger := NewLogger()
+	requestHeaders := map[string]string{"Authorization": "secret"}
+	logger.Add(TrafficLog{
+		ReqHeaders:  requestHeaders,
+		RespHeaders: map[string]string{"X-Test": "original"},
+	})
+	requestHeaders["Authorization"] = "changed before read"
+
+	entries := logger.Entries()
+	entries[0].ReqHeaders["Authorization"] = "changed"
+	entries[0].RespHeaders["X-Test"] = "changed"
+
+	again := logger.Entries()
+	if again[0].ReqHeaders["Authorization"] != "secret" {
+		t.Fatal("mutating returned request headers changed the logger's stored entry")
+	}
+	if again[0].RespHeaders["X-Test"] != "original" {
+		t.Fatal("mutating returned response headers changed the logger's stored entry")
+	}
+}
+
 func TestLoggerConcurrent(t *testing.T) {
 	l := NewLogger()
 	var wg sync.WaitGroup

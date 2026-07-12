@@ -223,6 +223,28 @@ func TestServeUDPSessionOpenError(t *testing.T) {
 	}
 }
 
+func TestServeUDPCancelUnblocksRead(t *testing.T) {
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer udpConn.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		ServeUDP(ctx, udpConn, nil)
+		close(done)
+	}()
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ServeUDP did not return when its context was canceled")
+	}
+}
+
 func TestServeUDPWriteFrameErrorCleansUpPeer(t *testing.T) {
 	oldWriteFrame := udpWriteFrame
 	oldReadFrame := udpReadFrame
@@ -340,6 +362,93 @@ func TestUDPStreamToConnCanceledContextRemovesPeer(t *testing.T) {
 	pm.mu.Unlock()
 	if ok {
 		t.Fatal("peer was not removed after canceled context")
+	}
+}
+
+func TestUDPStreamToConnCancelUnblocksFrameRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	stream, peer := net.Pipe()
+	defer peer.Close()
+
+	udpConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: 0})
+	if err != nil {
+		t.Fatalf("ListenUDP: %v", err)
+	}
+	defer udpConn.Close()
+
+	pm := newPeerManager()
+	pm.peers["peer"] = &udpPeer{stream: stream, lastSeen: time.Now()}
+	done := make(chan struct{})
+	go func() {
+		udpStreamToConn(ctx, stream, udpConn, udpConn.LocalAddr().(*net.UDPAddr), "peer", pm)
+		close(done)
+	}()
+
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("udpStreamToConn remained blocked reading a frame after cancellation")
+	}
+
+	pm.mu.Lock()
+	_, ok := pm.peers["peer"]
+	pm.mu.Unlock()
+	if ok {
+		t.Fatal("peer was not removed after cancellation")
+	}
+}
+
+func TestPeerManagerDoesNotHoldLockWhileOpeningStream(t *testing.T) {
+	pm := newPeerManager()
+	openStarted := make(chan struct{})
+	releaseOpen := make(chan struct{})
+	result := make(chan error)
+	stream, peer := net.Pipe()
+	defer peer.Close()
+
+	go func() {
+		_, _, err := pm.getOrCreate("peer", func() (net.Conn, error) {
+			close(openStarted)
+			<-releaseOpen
+			return stream, nil
+		})
+		result <- err
+	}()
+	<-openStarted
+
+	lockAvailable := make(chan struct{})
+	go func() {
+		pm.remove("other")
+		close(lockAvailable)
+	}()
+	select {
+	case <-lockAvailable:
+	case <-time.After(time.Second):
+		t.Fatal("peer manager lock was held while opening a stream")
+	}
+	close(releaseOpen)
+	if err := <-result; err != nil {
+		t.Fatalf("getOrCreate: %v", err)
+	}
+	pm.closeAll()
+}
+
+func TestPeerManagerBoundsPeerCount(t *testing.T) {
+	pm := newPeerManager()
+	for i := range maxUDPPeers {
+		pm.peers[string(rune(i))] = &udpPeer{}
+	}
+	openCalled := false
+	_, _, err := pm.getOrCreate("overflow", func() (net.Conn, error) {
+		openCalled = true
+		return nil, nil
+	})
+	if !errors.Is(err, errTooManyUDPPeers) {
+		t.Fatalf("getOrCreate error = %v, want %v", err, errTooManyUDPPeers)
+	}
+	if openCalled {
+		t.Fatal("stream was opened after reaching the peer limit")
 	}
 }
 

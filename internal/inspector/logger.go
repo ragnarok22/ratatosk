@@ -40,6 +40,9 @@ func NewLogger() *Logger {
 // Add appends a TrafficLog entry and returns its assigned ID.
 // The buffer is capped at maxEntries; oldest entries are evicted first.
 func (l *Logger) Add(entry TrafficLog) int {
+	entry.ReqHeaders = cloneHeaders(entry.ReqHeaders)
+	entry.RespHeaders = cloneHeaders(entry.RespHeaders)
+
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
@@ -59,7 +62,23 @@ func (l *Logger) Entries() []TrafficLog {
 
 	out := make([]TrafficLog, len(l.entries))
 	copy(out, l.entries)
+	for i := range out {
+		out[i].ReqHeaders = cloneHeaders(out[i].ReqHeaders)
+		out[i].RespHeaders = cloneHeaders(out[i].RespHeaders)
+	}
 	return out
+}
+
+func cloneHeaders(headers map[string]string) map[string]string {
+	if headers == nil {
+		return nil
+	}
+
+	cloned := make(map[string]string, len(headers))
+	for name, value := range headers {
+		cloned[name] = value
+	}
+	return cloned
 }
 
 // TruncateBody caps a body at maxBodyLog bytes for logging purposes.

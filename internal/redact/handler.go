@@ -2,6 +2,7 @@ package redact
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 )
 
@@ -48,8 +49,31 @@ func (h *Handler) WithGroup(name string) slog.Handler {
 }
 
 func redactAttr(a slog.Attr) slog.Attr {
-	if a.Value.Kind() == slog.KindString {
-		return slog.String(a.Key, String(a.Value.String()))
+	value := a.Value.Resolve()
+	switch value.Kind() {
+	case slog.KindString:
+		return slog.String(a.Key, String(value.String()))
+	case slog.KindGroup:
+		attrs := value.Group()
+		for i := range attrs {
+			attrs[i] = redactAttr(attrs[i])
+		}
+		return slog.Group(a.Key, attrsToAny(attrs)...)
+	case slog.KindAny:
+		switch item := value.Any().(type) {
+		case error:
+			return slog.String(a.Key, String(item.Error()))
+		case fmt.Stringer:
+			return slog.String(a.Key, String(item.String()))
+		}
 	}
-	return a
+	return slog.Attr{Key: a.Key, Value: value}
+}
+
+func attrsToAny(attrs []slog.Attr) []any {
+	values := make([]any, len(attrs))
+	for i := range attrs {
+		values[i] = attrs[i]
+	}
+	return values
 }

@@ -2,6 +2,7 @@ package redact
 
 import (
 	"bytes"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -139,5 +140,25 @@ func TestHandlerWithGroup(t *testing.T) {
 	}
 	if strings.Contains(out, "10.0.0.1") {
 		t.Errorf("WithGroup IP not redacted: %s", out)
+	}
+}
+
+func TestHandlerRedactsErrorsAndNestedGroups(t *testing.T) {
+	Enabled = true
+	defer func() { Enabled = false }()
+
+	var buf bytes.Buffer
+	logger := slog.New(NewHandler(slog.NewTextHandler(&buf, nil)))
+	logger.Error("request failed",
+		"error", errors.New("dial 192.168.1.9:3000"),
+		slog.Group("network", slog.Any("cause", errors.New("connect 10.0.0.2:80"))),
+	)
+
+	out := buf.String()
+	if strings.Contains(out, "192.168.1.9") || strings.Contains(out, "10.0.0.2") {
+		t.Fatalf("structured error escaped redaction: %s", out)
+	}
+	if !strings.Contains(out, placeholder) {
+		t.Fatalf("expected redaction placeholder: %s", out)
 	}
 }

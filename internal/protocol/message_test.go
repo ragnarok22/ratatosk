@@ -151,6 +151,23 @@ func TestTunnelRequestWithBasicAuth(t *testing.T) {
 	}
 }
 
+func TestTunnelRequestWithAuthToken(t *testing.T) {
+	req := &TunnelRequest{Protocol: ProtoHTTP, LocalPort: 3000, AuthToken: "control-secret"}
+
+	var buf bytes.Buffer
+	if err := WriteRequest(&buf, req); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+
+	got, err := ReadRequest(&buf)
+	if err != nil {
+		t.Fatalf("ReadRequest: %v", err)
+	}
+	if got.AuthToken != req.AuthToken {
+		t.Fatalf("AuthToken = %q, want %q", got.AuthToken, req.AuthToken)
+	}
+}
+
 func TestTunnelRequestBasicAuthOmitEmpty(t *testing.T) {
 	req := &TunnelRequest{Protocol: "http", LocalPort: 3000}
 
@@ -177,6 +194,48 @@ func TestReadResponseInvalidJSON(t *testing.T) {
 	_, err := ReadResponse(r)
 	if err == nil {
 		t.Fatal("ReadResponse with invalid JSON should return error")
+	}
+}
+
+func TestReadResponseRejectsOversizedMessage(t *testing.T) {
+	message := `{"success":false,"error":"` + strings.Repeat("x", 64<<10) + `"}`
+	if _, err := ReadResponse(strings.NewReader(message)); err == nil {
+		t.Fatal("ReadResponse accepted an oversized control message")
+	}
+}
+
+func TestReadResponseRejectsUnknownFields(t *testing.T) {
+	message := `{"success":true,"unexpected":true}`
+	if _, err := ReadResponse(strings.NewReader(message)); err == nil {
+		t.Fatal("ReadResponse accepted an unknown field")
+	}
+}
+
+func TestReadResponseRejectsTrailingJSON(t *testing.T) {
+	message := `{"success":true}{"success":false}`
+	if _, err := ReadResponse(strings.NewReader(message)); err == nil {
+		t.Fatal("ReadResponse accepted multiple JSON values")
+	}
+}
+
+func TestReadRequestRejectsOversizedMessage(t *testing.T) {
+	message := `{"protocol":"http","local_port":3000,"basic_auth":"` + strings.Repeat("x", 64<<10) + `"}`
+	if _, err := ReadRequest(strings.NewReader(message)); err == nil {
+		t.Fatal("ReadRequest accepted an oversized control message")
+	}
+}
+
+func TestReadRequestRejectsUnknownFields(t *testing.T) {
+	message := `{"protocol":"http","local_port":3000,"unexpected":true}`
+	if _, err := ReadRequest(strings.NewReader(message)); err == nil {
+		t.Fatal("ReadRequest accepted an unknown field")
+	}
+}
+
+func TestReadRequestRejectsTrailingJSON(t *testing.T) {
+	message := `{"protocol":"http","local_port":3000}{"protocol":"tcp","local_port":22}`
+	if _, err := ReadRequest(strings.NewReader(message)); err == nil {
+		t.Fatal("ReadRequest accepted multiple JSON values")
 	}
 }
 

@@ -14,16 +14,17 @@ import (
 
 func TestStartServer(t *testing.T) {
 	logger := NewLogger()
-	addr, err := StartServer(logger, "127.0.0.1")
+	server, err := StartServer(logger, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("StartServer failed: %v", err)
 	}
-	if addr == "" {
+	t.Cleanup(func() { _ = server.Close() })
+	if server.Addr == "" {
 		t.Fatal("expected non-empty address")
 	}
 
 	// GET /api/logs should return an empty JSON array.
-	resp, err := http.Get("http://" + addr + "/api/logs")
+	resp, err := http.Get("http://" + server.Addr + "/api/logs")
 	if err != nil {
 		t.Fatalf("GET /api/logs failed: %v", err)
 	}
@@ -43,7 +44,7 @@ func TestStartServer(t *testing.T) {
 	}
 
 	// GET / should return HTML.
-	resp2, err := http.Get("http://" + addr + "/")
+	resp2, err := http.Get("http://" + server.Addr + "/")
 	if err != nil {
 		t.Fatalf("GET / failed: %v", err)
 	}
@@ -68,14 +69,15 @@ func TestStartServerPortFallback(t *testing.T) {
 	defer ln.Close()
 
 	logger := NewLogger()
-	addr, err := StartServer(logger, "127.0.0.1")
+	server, err := StartServer(logger, "127.0.0.1")
 	if err != nil {
 		t.Fatalf("StartServer failed with port %d occupied: %v", first, err)
 	}
+	t.Cleanup(func() { _ = server.Close() })
 
 	// Should have fallen back to a different port.
-	if strings.Contains(addr, "4040") {
-		t.Fatalf("expected fallback port, got %s", addr)
+	if strings.Contains(server.Addr, "4040") {
+		t.Fatalf("expected fallback port, got %s", server.Addr)
 	}
 }
 
@@ -113,16 +115,17 @@ func TestStartServerAllPortsBusy(t *testing.T) {
 
 func TestStartServerCustomHost(t *testing.T) {
 	logger := NewLogger()
-	addr, err := StartServer(logger, "0.0.0.0")
+	server, err := StartServer(logger, "0.0.0.0")
 	if err != nil {
 		t.Fatalf("StartServer with 0.0.0.0 failed: %v", err)
 	}
+	t.Cleanup(func() { _ = server.Close() })
 
 	// When binding 0.0.0.0 the OS may report the address as [::]:port.
 	// Either form means "all interfaces", so just extract the port and verify.
-	_, port, perr := net.SplitHostPort(addr)
+	_, port, perr := net.SplitHostPort(server.Addr)
 	if perr != nil {
-		t.Fatalf("unexpected address format %q: %v", addr, perr)
+		t.Fatalf("unexpected address format %q: %v", server.Addr, perr)
 	}
 
 	resp, err := http.Get("http://127.0.0.1:" + port + "/api/logs")
@@ -136,17 +139,35 @@ func TestStartServerCustomHost(t *testing.T) {
 	}
 }
 
+func TestServerCloseReleasesListener(t *testing.T) {
+	server, err := StartServer(NewLogger(), "127.0.0.1")
+	if err != nil {
+		t.Fatalf("StartServer: %v", err)
+	}
+	addr := server.Addr
+	if err := server.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Fatalf("listener was not released: %v", err)
+	}
+	listener.Close()
+}
+
 func TestAPILogsAfterTraffic(t *testing.T) {
 	logger := NewLogger()
 	logger.Add(TrafficLog{Method: "POST", Path: "/data", RespStatus: 201})
 	logger.Add(TrafficLog{Method: "GET", Path: "/data", RespStatus: 200})
 
-	addr, err := StartServer(logger, "127.0.0.1")
+	server, err := StartServer(logger, "127.0.0.1")
 	if err != nil {
 		t.Skipf("StartServer failed (ports busy): %v", err)
 	}
+	t.Cleanup(func() { _ = server.Close() })
 
-	resp, err := http.Get("http://" + addr + "/api/logs")
+	resp, err := http.Get("http://" + server.Addr + "/api/logs")
 	if err != nil {
 		t.Fatalf("GET /api/logs failed: %v", err)
 	}
@@ -184,12 +205,13 @@ func TestAPILogsRedacted(t *testing.T) {
 		RespStatus: 200,
 	})
 
-	addr, err := StartServer(logger, "127.0.0.1")
+	server, err := StartServer(logger, "127.0.0.1")
 	if err != nil {
 		t.Skipf("StartServer failed (ports busy): %v", err)
 	}
+	t.Cleanup(func() { _ = server.Close() })
 
-	resp, err := http.Get("http://" + addr + "/api/logs")
+	resp, err := http.Get("http://" + server.Addr + "/api/logs")
 	if err != nil {
 		t.Fatalf("GET /api/logs failed: %v", err)
 	}

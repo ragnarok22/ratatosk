@@ -1,6 +1,7 @@
 package tunnel
 
 import (
+	"net"
 	"sync"
 	"testing"
 )
@@ -108,4 +109,34 @@ func TestReleaseUnallocated(t *testing.T) {
 	pa := NewPortAllocator(32000, 32010)
 	// Should not panic.
 	pa.Release(32005)
+}
+
+func TestAllocateScansEntireRange(t *testing.T) {
+	pa := NewPortAllocator(33000, 33064)
+	for port := pa.start; port < pa.end-1; port++ {
+		pa.used[port] = true
+	}
+	pa.available = func(port int) bool { return true }
+
+	port, err := pa.Allocate()
+	if err != nil {
+		t.Fatalf("Allocate: %v", err)
+	}
+	if port != pa.end-1 {
+		t.Fatalf("port = %d, want only free port %d", port, pa.end-1)
+	}
+}
+
+func TestAllocateRejectsUDPPortInUse(t *testing.T) {
+	udpConn, err := net.ListenPacket("udp", ":0")
+	if err != nil {
+		t.Fatalf("ListenPacket: %v", err)
+	}
+	defer udpConn.Close()
+	port := udpConn.LocalAddr().(*net.UDPAddr).Port
+
+	pa := NewPortAllocator(port, port+1)
+	if allocated, err := pa.Allocate(); err == nil {
+		t.Fatalf("Allocate returned UDP port in use: %d", allocated)
+	}
 }
