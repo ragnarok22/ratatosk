@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -2986,6 +2987,18 @@ func TestConstantTimeEqual(t *testing.T) {
 				t.Fatalf("constantTimeEqual() = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCredentialDigestUsesFixedLength(t *testing.T) {
+	short := credentialDigest("x")
+	long := credentialDigest(strings.Repeat("x", 1024))
+
+	if len(short) != sha256.Size || len(long) != sha256.Size {
+		t.Fatalf("digest lengths = %d and %d, want %d", len(short), len(long), sha256.Size)
+	}
+	if short == long {
+		t.Fatal("different credentials produced the same digest")
 	}
 }
 
