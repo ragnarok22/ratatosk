@@ -8,6 +8,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"math/big"
 	"net"
@@ -20,6 +21,12 @@ import (
 	"time"
 
 	"github.com/caddyserver/certmagic"
+)
+
+var (
+	defaultManageSyncFunc = manageSyncFunc
+	defaultServeHTTPFunc  = serveHTTPFunc
+	defaultServeHTTPSFunc = serveHTTPSFunc
 )
 
 func TestNewDNSProviderCloudflare(t *testing.T) {
@@ -39,6 +46,12 @@ func TestNewDNSProviderUnsupported(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "unsupported DNS provider") {
 		t.Fatalf("error = %q, want mention of unsupported provider", err.Error())
+	}
+}
+
+func TestDefaultManageSyncWrapperWithNoDomains(t *testing.T) {
+	if err := defaultManageSyncFunc(&certmagic.Config{}, context.Background(), nil); err != nil {
+		t.Fatalf("ManageSync with no domains: %v", err)
 	}
 }
 
@@ -197,6 +210,52 @@ func TestNewManagerSelectsBaseDomainAndUsesCertificateCache(t *testing.T) {
 	}
 }
 
+func TestNewManagerCertificateCacheResolvesConfigForMaintenance(t *testing.T) {
+	oldManageSync := manageSyncFunc
+	t.Cleanup(func() { manageSyncFunc = oldManageSync })
+
+	const domain = "managed.example.com"
+	tlsCert := newTestCertificate(t, domain)
+	privateKeyDER, err := x509.MarshalPKCS8PrivateKey(tlsCert.PrivateKey)
+	if err != nil {
+		t.Fatalf("marshal private key: %v", err)
+	}
+	certificatePEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: tlsCert.Certificate[0]})
+	privateKeyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateKeyDER})
+
+	manageSyncFunc = func(cfg *certmagic.Config, ctx context.Context, _ []string) error {
+		cfg.DisableARI = true
+		cfg.Storage = &certmagic.FileStorage{Path: t.TempDir()}
+		issuerKey := cfg.Issuers[0].IssuerKey()
+		resources := map[string][]byte{
+			certmagic.StorageKeys.SiteCert(issuerKey, domain):       certificatePEM,
+			certmagic.StorageKeys.SitePrivateKey(issuerKey, domain): privateKeyPEM,
+			certmagic.StorageKeys.SiteMeta(issuerKey, domain):       []byte(`{"sans":["managed.example.com"]}`),
+		}
+		for key, value := range resources {
+			if err := cfg.Storage.Store(ctx, key, value); err != nil {
+				return err
+			}
+		}
+		_, err := cfg.CacheManagedCertificate(ctx, domain)
+		return err
+	}
+
+	ctx := context.Background()
+	manager, err := NewManager(ctx, Config{
+		Provider: "cloudflare",
+		Domains:  []string{"example.com"},
+	})
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	t.Cleanup(manager.cache.Stop)
+
+	if err := manager.cache.RenewManagedCertificates(ctx); err != nil {
+		t.Fatalf("RenewManagedCertificates: %v", err)
+	}
+}
+
 func TestManagerTLSConfigIsReusable(t *testing.T) {
 	manager := newTestManager(t)
 
@@ -230,6 +289,8 @@ func TestManagerTLSConfigIsReusable(t *testing.T) {
 
 func TestManagerServeStartsHTTPSAndRedirect(t *testing.T) {
 	manager := newTestManager(t)
+	type contextKey struct{}
+	manager.ctx = context.WithValue(context.Background(), contextKey{}, "serve context")
 	oldListen := listenFunc
 	oldServeHTTP := serveHTTPFunc
 	oldServeHTTPS := serveHTTPSFunc
@@ -279,6 +340,9 @@ func TestManagerServeStartsHTTPSAndRedirect(t *testing.T) {
 	}
 
 	httpServer := <-httpServers
+	if got := httpServer.BaseContext(listeners[":80"]); got != manager.ctx {
+		t.Fatal("HTTP BaseContext did not return the manager context")
+	}
 	redirectRequest := httptest.NewRequest(http.MethodGet, "http://example.com:80/path?q=1", nil)
 	redirectResponse := httptest.NewRecorder()
 	httpServer.Handler.ServeHTTP(redirectResponse, redirectRequest)
@@ -324,6 +388,9 @@ func TestManagerServeStartsHTTPSAndRedirect(t *testing.T) {
 	}
 
 	httpsServer := <-httpsServers
+	if got := httpsServer.BaseContext(listeners[":443"]); got != manager.ctx {
+		t.Fatal("HTTPS BaseContext did not return the manager context")
+	}
 	response := httptest.NewRecorder()
 	httpsServer.Handler.ServeHTTP(response, httptest.NewRequest(http.MethodGet, "https://example.com/", nil))
 	if response.Code != http.StatusNoContent {
@@ -335,6 +402,82 @@ func TestManagerServeStartsHTTPSAndRedirect(t *testing.T) {
 	if !slices.Contains(httpsServer.TLSConfig.NextProtos, "h2") || !slices.Contains(httpsServer.TLSConfig.NextProtos, "http/1.1") {
 		t.Errorf("HTTPS protocols = %v, want h2 and http/1.1", httpsServer.TLSConfig.NextProtos)
 	}
+}
+
+func TestDefaultServeHTTPWrapper(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	server := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})}
+	t.Cleanup(func() { _ = server.Close() })
+	errCh := make(chan error, 1)
+	go func() { errCh <- defaultServeHTTPFunc(server, listener) }()
+
+	client := &http.Client{Transport: &http.Transport{}, Timeout: 2 * time.Second}
+	response, err := client.Get("http://" + listener.Addr().String())
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Errorf("status = %d, want %d", response.StatusCode, http.StatusNoContent)
+	}
+
+	if err := server.Close(); err != nil {
+		t.Fatalf("close server: %v", err)
+	}
+	assertServerClosed(t, errCh)
+}
+
+func TestDefaultServeHTTPSWrapper(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+
+	tlsCert := newTestCertificate(t, "localhost")
+	server := &http.Server{
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusNoContent)
+		}),
+		TLSConfig: &tls.Config{Certificates: []tls.Certificate{tlsCert}},
+	}
+	t.Cleanup(func() { _ = server.Close() })
+	errCh := make(chan error, 1)
+	go func() { errCh <- defaultServeHTTPSFunc(server, listener) }()
+
+	leaf, err := x509.ParseCertificate(tlsCert.Certificate[0])
+	if err != nil {
+		t.Fatalf("parse certificate: %v", err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+	client := &http.Client{
+		Transport: &http.Transport{TLSClientConfig: &tls.Config{
+			RootCAs:    roots,
+			ServerName: "localhost",
+		}},
+		Timeout: 2 * time.Second,
+	}
+	response, err := client.Get("https://" + listener.Addr().String())
+	if err != nil {
+		t.Fatalf("GET: %v", err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusNoContent {
+		t.Errorf("status = %d, want %d", response.StatusCode, http.StatusNoContent)
+	}
+
+	if err := server.Close(); err != nil {
+		t.Fatalf("close server: %v", err)
+	}
+	assertServerClosed(t, errCh)
 }
 
 func TestManagerServeReturnsListenErrors(t *testing.T) {
@@ -586,6 +729,18 @@ func serverResultFunc(returnsFirst bool, firstErr, secondErr error) func(*http.S
 		}
 		<-listener.(*testListener).closed
 		return secondErr
+	}
+}
+
+func assertServerClosed(t *testing.T, errCh <-chan error) {
+	t.Helper()
+	select {
+	case err := <-errCh:
+		if !errors.Is(err, http.ErrServerClosed) {
+			t.Fatalf("serve error = %v, want %v", err, http.ErrServerClosed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("server did not stop")
 	}
 }
 

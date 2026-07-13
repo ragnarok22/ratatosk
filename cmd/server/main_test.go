@@ -15,6 +15,7 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
 	"math/big"
 	"net"
 	"net/http"
@@ -285,6 +286,202 @@ type deadlineErrorConn struct {
 
 func (c deadlineErrorConn) SetDeadline(time.Time) error {
 	return c.err
+}
+
+type deadlineSequenceConn struct {
+	net.Conn
+	mu      sync.Mutex
+	calls   int
+	failAt  int
+	failErr error
+}
+
+func (c *deadlineSequenceConn) SetDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	c.calls++
+	call := c.calls
+	c.mu.Unlock()
+	if call == c.failAt {
+		return c.failErr
+	}
+	return c.Conn.SetDeadline(deadline)
+}
+
+type controlTestConn struct {
+	closed        chan struct{}
+	readCalled    chan struct{}
+	remoteCalled  chan struct{}
+	remoteRelease <-chan struct{}
+	closeOnce     sync.Once
+	readOnce      sync.Once
+	remoteOnce    sync.Once
+}
+
+func newControlTestConn(remoteRelease <-chan struct{}) *controlTestConn {
+	return &controlTestConn{
+		closed:        make(chan struct{}),
+		readCalled:    make(chan struct{}),
+		remoteCalled:  make(chan struct{}),
+		remoteRelease: remoteRelease,
+	}
+}
+
+func (c *controlTestConn) Read([]byte) (int, error) {
+	c.readOnce.Do(func() { close(c.readCalled) })
+	<-c.closed
+	return 0, net.ErrClosed
+}
+
+func (c *controlTestConn) Write(payload []byte) (int, error) {
+	select {
+	case <-c.closed:
+		return 0, net.ErrClosed
+	default:
+		return len(payload), nil
+	}
+}
+
+func (c *controlTestConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func (c *controlTestConn) LocalAddr() net.Addr {
+	return stubAddr("127.0.0.1:7000")
+}
+
+func (c *controlTestConn) RemoteAddr() net.Addr {
+	c.remoteOnce.Do(func() { close(c.remoteCalled) })
+	if c.remoteRelease != nil {
+		<-c.remoteRelease
+	}
+	return stubAddr("127.0.0.1:40000")
+}
+
+func (c *controlTestConn) SetDeadline(time.Time) error {
+	return nil
+}
+
+func (*controlTestConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+
+func (*controlTestConn) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
+type controlTestListener struct {
+	connections chan net.Conn
+	closed      chan struct{}
+	closeOnce   sync.Once
+}
+
+func newControlTestListener() *controlTestListener {
+	return &controlTestListener{
+		connections: make(chan net.Conn),
+		closed:      make(chan struct{}),
+	}
+}
+
+func (l *controlTestListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.connections:
+		return conn, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *controlTestListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (*controlTestListener) Addr() net.Addr {
+	return stubAddr("127.0.0.1:7000")
+}
+
+type closeAcceptListener struct {
+	initial   []net.Conn
+	final     net.Conn
+	closed    chan struct{}
+	closeOnce sync.Once
+	next      int
+}
+
+func (l *closeAcceptListener) Accept() (net.Conn, error) {
+	if l.next < len(l.initial) {
+		conn := l.initial[l.next]
+		l.next++
+		return conn, nil
+	}
+	if l.next == len(l.initial) {
+		<-l.closed
+		l.next++
+		return l.final, nil
+	}
+	return nil, net.ErrClosed
+}
+
+func (l *closeAcceptListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (*closeAcceptListener) Addr() net.Addr {
+	return stubAddr("127.0.0.1:7000")
+}
+
+type notifiedAcceptError struct {
+	notify chan struct{}
+	once   *sync.Once
+}
+
+func (e notifiedAcceptError) Error() string {
+	if e.notify != nil {
+		e.once.Do(func() { close(e.notify) })
+	}
+	return "accept failed"
+}
+
+type repeatedErrorListener struct {
+	closed     chan struct{}
+	closeOnce  sync.Once
+	calls      int
+	notifyCall int
+	notify     chan struct{}
+	notifyOnce sync.Once
+}
+
+func (l *repeatedErrorListener) Accept() (net.Conn, error) {
+	select {
+	case <-l.closed:
+		return nil, net.ErrClosed
+	default:
+	}
+	l.calls++
+	if l.calls == l.notifyCall {
+		return nil, notifiedAcceptError{notify: l.notify, once: &l.notifyOnce}
+	}
+	return nil, notifiedAcceptError{}
+}
+
+func (l *repeatedErrorListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (*repeatedErrorListener) Addr() net.Addr {
+	return stubAddr("127.0.0.1:7000")
+}
+
+func waitForTestEvent(t *testing.T, event <-chan struct{}, failure string) {
+	t.Helper()
+	select {
+	case <-event:
+	case <-time.After(5 * time.Second):
+		t.Fatal(failure)
+	}
 }
 
 func newLoopbackServer(t *testing.T, handler http.Handler) *httptest.Server {
@@ -3755,4 +3952,287 @@ func TestRunMainStartupUpdateCheck(t *testing.T) {
 	// Unblock runMain so the goroutine completes before cleanup.
 	adminErrs <- nil
 	<-done
+}
+
+func TestRunMainReturnsZeroOnShutdownSignal(t *testing.T) {
+	oldCfg := cfg
+	oldCheckUpdate := serverCheckUpdate
+	oldStartControlPlane := serverStartControlPlane
+	oldStartAdminServer := serverStartAdminServer
+	oldStartPublicServer := serverStartPublicServer
+	t.Cleanup(func() {
+		cfg = oldCfg
+		serverCheckUpdate = oldCheckUpdate
+		serverStartControlPlane = oldStartControlPlane
+		serverStartAdminServer = oldStartAdminServer
+		serverStartPublicServer = oldStartPublicServer
+	})
+
+	serverCheckUpdate = noopCheckUpdate
+	started := make(chan struct{}, 3)
+	stopped := make(chan struct{})
+	serverStartControlPlane = func(stop <-chan struct{}, _ func(string, string) (net.Listener, error)) error {
+		started <- struct{}{}
+		go func() {
+			<-stop
+			close(stopped)
+		}()
+		return nil
+	}
+	serverStartAdminServer = func(<-chan struct{}, func(string, http.Handler) error) <-chan error {
+		started <- struct{}{}
+		return make(chan error)
+	}
+	serverStartPublicServer = func(<-chan struct{}, func(string, http.Handler) error, func(string, string, string, http.Handler) error) <-chan error {
+		started <- struct{}{}
+		return make(chan error)
+	}
+
+	type result struct {
+		code int
+		log  string
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		var output bytes.Buffer
+		code := runMain(&output, func() (*config.ServerConfig, error) {
+			return &config.ServerConfig{
+				BaseDomain:     "localhost",
+				PublicPort:     8080,
+				AdminPort:      8081,
+				ControlPort:    7000,
+				PortRangeStart: 34000,
+				PortRangeEnd:   34010,
+			}, nil
+		}, nil, nil, nil)
+		resultCh <- result{code: code, log: output.String()}
+	}()
+
+	for range 3 {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("runMain did not start all server components")
+		}
+	}
+	process, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	if err := process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("signal process: %v", err)
+	}
+
+	select {
+	case got := <-resultCh:
+		if got.code != 0 {
+			t.Fatalf("code = %d, want 0", got.code)
+		}
+		if !strings.Contains(got.log, "shutdown signal received") {
+			t.Fatalf("log = %q, want shutdown signal message", got.log)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runMain did not return after interrupt")
+	}
+	waitForTestEvent(t, stopped, "runMain did not close the control-plane stop channel")
+}
+
+func TestDefaultAutomaticTLSManagerRejectsUnsupportedProvider(t *testing.T) {
+	_, err := mainNewCertmagicManager(context.Background(), autocert.Config{
+		Provider: "unsupported",
+		Domains:  []string{"tunnel.example.com", "*.tunnel.example.com"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported DNS provider") {
+		t.Fatalf("err = %v, want unsupported provider error", err)
+	}
+}
+
+func TestStartControlPlaneCapsAcceptBackoffAndStopsRetry(t *testing.T) {
+	oldCfg := cfg
+	oldLogger := slog.Default()
+	cfg = &config.ServerConfig{ControlPort: 7000}
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() {
+		cfg = oldCfg
+		slog.SetDefault(oldLogger)
+	})
+
+	listener := &repeatedErrorListener{
+		closed:     make(chan struct{}),
+		notifyCall: 9,
+		notify:     make(chan struct{}),
+	}
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	stopServer := func() { stopOnce.Do(func() { close(stop) }) }
+	t.Cleanup(func() {
+		stopServer()
+		listener.Close()
+	})
+
+	if err := startControlPlane(stop, func(string, string) (net.Listener, error) {
+		return listener, nil
+	}); err != nil {
+		t.Fatalf("startControlPlane: %v", err)
+	}
+	waitForTestEvent(t, listener.notify, "accept loop did not reach the capped backoff")
+	stopServer()
+	waitForTestEvent(t, listener.closed, "control listener was not closed during backoff")
+}
+
+func TestStartControlPlaneRejectsHandshakeAndConnectionOverflow(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	cfg = &config.ServerConfig{ControlPort: 7000, ControlTLSEnabled: true}
+	controlTLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+	})
+
+	listener := newControlTestListener()
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	stopServer := func() { stopOnce.Do(func() { close(stop) }) }
+	remoteRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRemotes := func() { releaseOnce.Do(func() { close(remoteRelease) }) }
+	allConnections := make([]*controlTestConn, 0, maxControlConnections+1)
+	t.Cleanup(func() {
+		releaseRemotes()
+		stopServer()
+		listener.Close()
+		for _, conn := range allConnections {
+			conn.Close()
+		}
+	})
+
+	if err := startControlPlane(stop, func(string, string) (net.Listener, error) {
+		return listener, nil
+	}); err != nil {
+		t.Fatalf("startControlPlane: %v", err)
+	}
+
+	for range maxPendingControlHandshakes {
+		conn := newControlTestConn(nil)
+		allConnections = append(allConnections, conn)
+		listener.connections <- conn
+		waitForTestEvent(t, conn.readCalled, "connection did not occupy a handshake slot")
+	}
+
+	handshakeRejected := make([]*controlTestConn, 0, maxControlConnections-maxPendingControlHandshakes)
+	for range maxControlConnections - maxPendingControlHandshakes {
+		conn := newControlTestConn(remoteRelease)
+		allConnections = append(allConnections, conn)
+		handshakeRejected = append(handshakeRejected, conn)
+		listener.connections <- conn
+		waitForTestEvent(t, conn.remoteCalled, "handshake overflow was not rejected")
+	}
+
+	connectionRejected := newControlTestConn(nil)
+	allConnections = append(allConnections, connectionRejected)
+	listener.connections <- connectionRejected
+	waitForTestEvent(t, connectionRejected.remoteCalled, "connection overflow was not rejected")
+	waitForTestEvent(t, connectionRejected.closed, "connection overflow was not closed")
+
+	releaseRemotes()
+	for _, conn := range handshakeRejected {
+		waitForTestEvent(t, conn.closed, "handshake overflow connection was not closed")
+	}
+	stopServer()
+	waitForTestEvent(t, listener.closed, "control listener was not closed")
+}
+
+func TestStartControlPlaneStopsConnectionBeforeHandshakeAdmission(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	cfg = &config.ServerConfig{ControlPort: 7000, ControlTLSEnabled: true}
+	controlTLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+	})
+
+	initial := make([]net.Conn, 0, maxPendingControlHandshakes)
+	blockers := make([]*controlTestConn, 0, maxPendingControlHandshakes)
+	for range maxPendingControlHandshakes {
+		conn := newControlTestConn(nil)
+		initial = append(initial, conn)
+		blockers = append(blockers, conn)
+	}
+	final := newControlTestConn(nil)
+	listener := &closeAcceptListener{
+		initial: initial,
+		final:   final,
+		closed:  make(chan struct{}),
+	}
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	stopServer := func() { stopOnce.Do(func() { close(stop) }) }
+	t.Cleanup(func() {
+		stopServer()
+		listener.Close()
+		final.Close()
+		for _, conn := range blockers {
+			conn.Close()
+		}
+	})
+
+	if err := startControlPlane(stop, func(string, string) (net.Listener, error) {
+		return listener, nil
+	}); err != nil {
+		t.Fatalf("startControlPlane: %v", err)
+	}
+	for _, conn := range blockers {
+		waitForTestEvent(t, conn.readCalled, "connection did not occupy a handshake slot")
+	}
+
+	stopServer()
+	waitForTestEvent(t, final.closed, "connection accepted during shutdown was not closed")
+	for _, conn := range blockers {
+		waitForTestEvent(t, conn.closed, "active handshake was not closed during shutdown")
+	}
+}
+
+func TestHandleConnectionLogsDeadlineClearFailure(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	wantErr := errors.New("clear deadline failed")
+	sequencedConn := &deadlineSequenceConn{Conn: serverConn, failAt: 2, failErr: wantErr}
+	t.Cleanup(func() {
+		clientConn.Close()
+		serverConn.Close()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		handleConnection(sequencedConn)
+		close(done)
+	}()
+	clientSession, err := tunnel.NewClientSession(clientConn)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+	controlStream, err := clientSession.Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := protocol.WriteRequest(controlStream, &protocol.TunnelRequest{Protocol: "unsupported"}); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+	response, err := protocol.ReadResponse(controlStream)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if response.Success || response.Error != "unsupported protocol" {
+		t.Fatalf("response = %+v, want unsupported protocol failure", response)
+	}
+	clientSession.Close()
+	waitForTestEvent(t, done, "handleConnection did not return")
+
+	sequencedConn.mu.Lock()
+	calls := sequencedConn.calls
+	sequencedConn.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("SetDeadline calls = %d, want 2", calls)
+	}
 }

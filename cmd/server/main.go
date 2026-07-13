@@ -339,6 +339,12 @@ func startControlPlane(
 			}
 			retryDelay = 0
 			select {
+			case <-stop:
+				conn.Close()
+				return
+			default:
+			}
+			select {
 			case connectionSlots <- struct{}{}:
 			default:
 				slog.Warn("control connection limit reached", "remote", conn.RemoteAddr())
@@ -346,6 +352,14 @@ func startControlPlane(
 				continue
 			}
 			connections.Store(conn, struct{}{})
+			select {
+			case <-stop:
+				conn.Close()
+				connections.Delete(conn)
+				<-connectionSlots
+				return
+			default:
+			}
 			go func() {
 				defer func() { <-connectionSlots }()
 				defer connections.Delete(conn)

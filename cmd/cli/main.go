@@ -47,6 +47,7 @@ var (
 	cliInspectorHost              = "127.0.0.1"
 	cliResolveUDPAddr             = net.ResolveUDPAddr
 	cliDialUDP                    = net.DialUDP
+	cliSetDeadline                = func(conn net.Conn, deadline time.Time) error { return conn.SetDeadline(deadline) }
 	cliControlOptions   controlOptions
 	cliHandshakeTimeout = 10 * time.Second
 )
@@ -363,7 +364,7 @@ func connectAndHandshake(serverAddr string, tunnelReq *protocol.TunnelRequest) (
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to connect to relay server at %s: %w", serverAddr, err)
 	}
-	if err := conn.SetDeadline(time.Now().Add(cliHandshakeTimeout)); err != nil {
+	if err := cliSetDeadline(conn, time.Now().Add(cliHandshakeTimeout)); err != nil {
 		conn.Close()
 		return nil, nil, nil, fmt.Errorf("setting handshake deadline: %w", err)
 	}
@@ -378,7 +379,7 @@ func connectAndHandshake(serverAddr string, tunnelReq *protocol.TunnelRequest) (
 			conn.Close()
 			return nil, nil, nil, fmt.Errorf("control authentication failed: %w", err)
 		}
-		if err := conn.SetDeadline(time.Now().Add(cliHandshakeTimeout)); err != nil {
+		if err := cliSetDeadline(conn, time.Now().Add(cliHandshakeTimeout)); err != nil {
 			conn.Close()
 			return nil, nil, nil, fmt.Errorf("restoring handshake deadline: %w", err)
 		}
@@ -419,7 +420,7 @@ func connectAndHandshake(serverAddr string, tunnelReq *protocol.TunnelRequest) (
 		conn.Close()
 		return nil, nil, nil, fmt.Errorf("tunnel creation failed: %s", resp.Error)
 	}
-	if err := conn.SetDeadline(time.Time{}); err != nil {
+	if err := cliSetDeadline(conn, time.Time{}); err != nil {
 		session.Close()
 		conn.Close()
 		return nil, nil, nil, fmt.Errorf("clearing handshake deadline: %w", err)
