@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
@@ -2990,15 +2989,26 @@ func TestConstantTimeEqual(t *testing.T) {
 	}
 }
 
-func TestCredentialDigestUsesFixedLength(t *testing.T) {
-	short := credentialDigest("x")
-	long := credentialDigest(strings.Repeat("x", 1024))
-
-	if len(short) != sha256.Size || len(long) != sha256.Size {
-		t.Fatalf("digest lengths = %d and %d, want %d", len(short), len(long), sha256.Size)
+func TestNormalizeCredentialMatchesExpectedLength(t *testing.T) {
+	tests := []struct {
+		name       string
+		credential string
+		length     int
+		want       []byte
+	}{
+		{name: "shorter", credential: "abc", length: 5, want: []byte{'a', 'b', 'c', 0, 0}},
+		{name: "equal", credential: "abc", length: 3, want: []byte("abc")},
+		{name: "longer", credential: "abcdef", length: 3, want: []byte("abc")},
+		{name: "empty", credential: "abc", length: 0, want: []byte{}},
 	}
-	if short == long {
-		t.Fatal("different credentials produced the same digest")
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeCredential(tt.credential, tt.length)
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("normalizeCredential() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 

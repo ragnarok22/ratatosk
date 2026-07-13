@@ -1,7 +1,6 @@
 package main
 
 import (
-	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/json"
 	"io/fs"
@@ -119,13 +118,15 @@ func adminSecurityHeaders(next http.Handler) http.Handler {
 }
 
 func constantTimeEqual(actual, expected string) bool {
-	actualDigest := credentialDigest(actual)
-	expectedDigest := credentialDigest(expected)
-	return subtle.ConstantTimeCompare(actualDigest[:], expectedDigest[:]) == 1
+	contentEqual := subtle.ConstantTimeCompare(normalizeCredential(actual, len(expected)), []byte(expected))
+	lengthEqual := subtle.ConstantTimeEq(int32(len(actual)), int32(len(expected)))
+	return contentEqual&lengthEqual == 1
 }
 
-func credentialDigest(credential string) [sha256.Size]byte {
-	return sha256.Sum256([]byte(credential))
+func normalizeCredential(credential string, expectedLength int) []byte {
+	normalized := make([]byte, expectedLength)
+	copy(normalized, credential)
+	return normalized
 }
 
 func tunnelEndpoint(serverConfig *config.ServerConfig, info tunnel.TunnelInfo) string {
