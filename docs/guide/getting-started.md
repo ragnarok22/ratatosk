@@ -27,7 +27,7 @@ Expose your local service to the internet:
 ratatosk --port 3000
 ```
 
-The CLI connects to the relay server, establishes a [yamux](https://github.com/hashicorp/yamux) session, and prints the public tunnel URL:
+With the default local relay address, the CLI connects over loopback, establishes a [yamux](https://github.com/hashicorp/yamux) session, and prints the public tunnel URL:
 
 ```
 Ratatosk                        (Ctrl+C to quit)
@@ -37,6 +37,17 @@ Web Interface   http://127.0.0.1:4300
 ```
 
 Anyone on the internet can now access your local service through the forwarding URL. The web interface provides a local traffic inspector for monitoring requests and responses flowing through the tunnel.
+
+## Connect to a Remote Relay
+
+A remote relay requires a shared control token of at least 32 bytes. The CLI accepts it only from an environment variable or file, never a command-line flag. A file avoids placing the secret directly in the process environment:
+
+```sh
+export RATATOSK_CONTROL_TOKEN_FILE="$HOME/.config/ratatosk/control-token"
+ratatosk --server tunnel.example.com:7000 --port 3000
+```
+
+Remote server addresses automatically use TLS with certificate and hostname verification. Do not add `--tls` for a normal remote connection; that flag exists to force TLS when connecting to loopback. If the relay uses a private CA, add `--ca /path/to/ca.pem`; if the address does not match the certificate name, add `--server-name tunnel.example.com`. Verification cannot be disabled.
 
 ## Default Port
 
@@ -74,6 +85,7 @@ ratatosk tcp 6379          # Redis
 Use `--server` to point at a remote relay:
 
 ```sh
+export RATATOSK_CONTROL_TOKEN_FILE="$HOME/.config/ratatosk/control-token"
 ratatosk tcp 22 --server tunnel.example.com:7000
 ```
 
@@ -95,13 +107,15 @@ UDP datagrams are framed over the yamux TCP connection, preserving message bound
 
 ## Protect with Basic Auth
 
-If you don't want your tunnel to be publicly accessible, add `--basic-auth` to require a username and password:
+If you don't want your tunnel to be publicly accessible, add `--basic-auth` to require a username and password from HTTP visitors:
 
 ```sh
 ratatosk --port 3000 --basic-auth "admin:secret"
 ```
 
 Visitors will see a browser login dialog before any traffic reaches your local service. See [CLI Commands > --basic-auth](/reference/cli-commands#basic-auth) for details.
+
+Visitor Basic Auth does not replace the control token: Basic Auth controls who can visit the public HTTP tunnel, while the control token authenticates the CLI to the relay. The Cloudflare API token mentioned in the deployment guide is a third credential used only by the server to automate DNS-01 certificates.
 
 ## Streamer Mode
 

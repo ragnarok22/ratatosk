@@ -48,7 +48,7 @@ The relay server accepts CLI client connections and routes public HTTP traffic t
 
 ### Docker (Recommended)
 
-Use the secured Compose template, which requires admin credentials, a control-plane token, and control TLS certificate paths before exposing remote listeners:
+Use the secured Compose template, which requires admin credentials, a control-plane token, and TLS before exposing remote listeners. A dedicated control certificate is optional when the public manual or CertMagic certificate covers the relay hostname:
 
 ```sh
 cd deploy/compose

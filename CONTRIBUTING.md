@@ -77,6 +77,8 @@ make test-race
 make coverage
 ```
 
+`make coverage` fails when aggregate Go statement coverage is below 85%.
+
 For dashboard changes, run from `cmd/server/dashboard`:
 
 ```sh

@@ -2,11 +2,13 @@ package main
 
 import (
 	"bytes"
+	"encoding/base64"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/iotest"
 	"text/template"
 
 	"github.com/charmbracelet/huh"
@@ -187,9 +189,79 @@ func TestRenderConfigWithoutTLS(t *testing.T) {
 	if got := v.GetBool("tls_auto"); got {
 		t.Error("tls_auto = true, want false")
 	}
+	if got := v.GetString("control_host"); got != "127.0.0.1" {
+		t.Errorf("control_host = %q, want 127.0.0.1", got)
+	}
+	if got := v.GetBool("control_tls_enabled"); got {
+		t.Error("control_tls_enabled = true, want false")
+	}
+	if got := v.GetString("control_token_file"); got != "" {
+		t.Errorf("control_token_file = %q, want empty", got)
+	}
 	// TLS fields should not be present
 	if got := v.GetString("tls_email"); got != "" {
 		t.Errorf("tls_email = %q, want empty", got)
+	}
+}
+
+func TestRenderConfigWithRemoteControl(t *testing.T) {
+	answers := initAnswers{
+		BaseDomain:       "tunnel.example.com",
+		TLSAuto:          true,
+		TLSEmail:         "admin@example.com",
+		TLSProvider:      "cloudflare",
+		TLSAPIToken:      "cf-token-secret",
+		RemoteControl:    true,
+		ControlTokenFile: "/etc/ratatosk/control-token",
+	}
+
+	data, err := renderConfig(initConfigTmpl, answers)
+	if err != nil {
+		t.Fatalf("renderConfig() error = %v", err)
+	}
+
+	v := viper.New()
+	v.SetConfigType("yaml")
+	if err := v.ReadConfig(bytes.NewReader(data)); err != nil {
+		t.Fatalf("failed to parse rendered YAML: %v", err)
+	}
+	if got := v.GetString("control_host"); got != "0.0.0.0" {
+		t.Errorf("control_host = %q, want 0.0.0.0", got)
+	}
+	if got := v.GetBool("control_tls_enabled"); !got {
+		t.Error("control_tls_enabled = false, want true")
+	}
+	if got := v.GetString("control_token_file"); got != answers.ControlTokenFile {
+		t.Errorf("control_token_file = %q, want %q", got, answers.ControlTokenFile)
+	}
+	if got := v.GetString("control_tls_cert_file"); got != "" {
+		t.Errorf("control_tls_cert_file = %q, want empty", got)
+	}
+	if got := v.GetString("control_tls_key_file"); got != "" {
+		t.Errorf("control_tls_key_file = %q, want empty", got)
+	}
+	if got := v.GetString("control_token"); got != "" {
+		t.Errorf("control_token = %q, want empty", got)
+	}
+}
+
+func TestCanExposeControlRemotely(t *testing.T) {
+	tests := []struct {
+		name    string
+		answers initAnswers
+		want    bool
+	}{
+		{name: "automatic TLS and domain", answers: initAnswers{BaseDomain: "tunnel.example.com", TLSAuto: true}, want: true},
+		{name: "no automatic TLS", answers: initAnswers{BaseDomain: "tunnel.example.com"}, want: false},
+		{name: "invalid domain", answers: initAnswers{BaseDomain: "localhost", TLSAuto: true}, want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := canExposeControlRemotely(tt.answers); got != tt.want {
+				t.Errorf("canExposeControlRemotely() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -444,7 +516,10 @@ func stubInitDeps(t *testing.T, stdout *bytes.Buffer) {
 	oldMkdirAll := initMkdirAll
 	oldStat := initStat
 	oldRunForm := initRunForm
+	oldCollectAnswers := initCollectAnswers
 	oldConfirmOverwrite := initConfirmOverwrite
+	oldRandomReader := initRandomReader
+	oldRemoveFile := initRemoveFile
 	t.Cleanup(func() {
 		initStdout = oldStdout
 		initGetEUID = oldGetEUID
@@ -452,7 +527,10 @@ func stubInitDeps(t *testing.T, stdout *bytes.Buffer) {
 		initMkdirAll = oldMkdirAll
 		initStat = oldStat
 		initRunForm = oldRunForm
+		initCollectAnswers = oldCollectAnswers
 		initConfirmOverwrite = oldConfirmOverwrite
+		initRandomReader = oldRandomReader
+		initRemoveFile = oldRemoveFile
 	})
 	initStdout = stdout
 	initGetEUID = func() int { return 1000 }
@@ -460,7 +538,381 @@ func stubInitDeps(t *testing.T, stdout *bytes.Buffer) {
 	initStat = func(string) (os.FileInfo, error) { return nil, os.ErrNotExist }
 	initWriteFile = func(string, []byte, os.FileMode) error { return nil }
 	initRunForm = func(*huh.Form) error { return nil }
+	initCollectAnswers = collectInitAnswers
 	initConfirmOverwrite = func(string) (bool, error) { return false, nil }
+	initRandomReader = bytes.NewReader(make([]byte, 32))
+	initRemoveFile = func(string) error { return nil }
+}
+
+func TestRunInitSecureRemoteControl(t *testing.T) {
+	var stdout bytes.Buffer
+	stubInitDeps(t, &stdout)
+
+	type write struct {
+		path string
+		data []byte
+		perm os.FileMode
+	}
+	var writes []write
+	wantRandom := bytes.Repeat([]byte{0xa5}, 32)
+	wantToken := base64.StdEncoding.EncodeToString(wantRandom)
+
+	initGetEUID = func() int { return 0 }
+	initCollectAnswers = func(answers *initAnswers) error {
+		*answers = initAnswers{
+			BaseDomain:    "tunnel.example.com",
+			TLSAuto:       true,
+			TLSEmail:      "admin@example.com",
+			TLSProvider:   "cloudflare",
+			TLSAPIToken:   "cf-token-secret",
+			RemoteControl: true,
+		}
+		return nil
+	}
+	initRandomReader = bytes.NewReader(wantRandom)
+	initWriteFile = func(path string, data []byte, perm os.FileMode) error {
+		writes = append(writes, write{path: path, data: append([]byte(nil), data...), perm: perm})
+		return nil
+	}
+
+	code := runInit()
+	if code != 0 {
+		t.Fatalf("runInit() = %d, want 0; output:\n%s", code, stdout.String())
+	}
+	if len(writes) != 2 {
+		t.Fatalf("writes = %d, want token and config writes", len(writes))
+	}
+	if writes[0].path != "/etc/ratatosk/control-token" {
+		t.Errorf("token path = %q, want /etc/ratatosk/control-token", writes[0].path)
+	}
+	if writes[0].perm != 0o600 {
+		t.Errorf("token mode = %o, want 600", writes[0].perm)
+	}
+	if got := strings.TrimSpace(string(writes[0].data)); got != wantToken {
+		t.Fatalf("token file content = %q, want deterministic base64 token", got)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(writes[0].data)))
+	if err != nil {
+		t.Fatalf("decode token: %v", err)
+	}
+	if !bytes.Equal(decoded, wantRandom) {
+		t.Fatalf("decoded token has %d bytes with unexpected content", len(decoded))
+	}
+	if writes[1].path != "/etc/ratatosk/ratatosk.yaml" {
+		t.Errorf("config path = %q, want /etc/ratatosk/ratatosk.yaml", writes[1].path)
+	}
+	if writes[1].perm != 0o600 {
+		t.Errorf("config mode = %o, want 600", writes[1].perm)
+	}
+	if strings.Contains(string(writes[1].data), wantToken) {
+		t.Error("rendered config contains the control token")
+	}
+	if strings.Contains(stdout.String(), wantToken) {
+		t.Error("stdout contains the control token")
+	}
+
+	v := viper.New()
+	v.SetConfigType("yaml")
+	if err := v.ReadConfig(bytes.NewReader(writes[1].data)); err != nil {
+		t.Fatalf("parse config: %v", err)
+	}
+	if got := v.GetString("control_host"); got != "0.0.0.0" {
+		t.Errorf("control_host = %q, want 0.0.0.0", got)
+	}
+	if !v.GetBool("control_tls_enabled") {
+		t.Error("control_tls_enabled = false, want true")
+	}
+	if got := v.GetString("control_token_file"); got != writes[0].path {
+		t.Errorf("control_token_file = %q, want %q", got, writes[0].path)
+	}
+}
+
+func TestRunInitControlTokenRandomError(t *testing.T) {
+	var stdout bytes.Buffer
+	stubInitDeps(t, &stdout)
+
+	initCollectAnswers = func(answers *initAnswers) error {
+		*answers = initAnswers{BaseDomain: "tunnel.example.com", TLSAuto: true, RemoteControl: true}
+		return nil
+	}
+	initRandomReader = iotest.ErrReader(os.ErrInvalid)
+	written := false
+	initWriteFile = func(string, []byte, os.FileMode) error {
+		written = true
+		return nil
+	}
+
+	code := runInit()
+	if code != 1 {
+		t.Fatalf("runInit() = %d, want 1", code)
+	}
+	if written {
+		t.Error("file written after random generation failed")
+	}
+	if !strings.Contains(stdout.String(), "Error generating control token") {
+		t.Errorf("output missing random generation error: %s", stdout.String())
+	}
+}
+
+func TestRunInitControlTokenStatError(t *testing.T) {
+	var stdout bytes.Buffer
+	stubInitDeps(t, &stdout)
+
+	initCollectAnswers = func(answers *initAnswers) error {
+		*answers = initAnswers{BaseDomain: "tunnel.example.com", TLSAuto: true, RemoteControl: true}
+		return nil
+	}
+	initStat = func(path string) (os.FileInfo, error) {
+		if path == "control-token" {
+			return nil, os.ErrPermission
+		}
+		return nil, os.ErrNotExist
+	}
+	writeCalled := false
+	initWriteFile = func(string, []byte, os.FileMode) error {
+		writeCalled = true
+		return nil
+	}
+
+	code := runInit()
+	if code != 1 {
+		t.Fatalf("runInit() = %d, want 1", code)
+	}
+	if writeCalled {
+		t.Error("file written after control token stat failed")
+	}
+	if !strings.Contains(stdout.String(), "Error checking control token file control-token: permission denied") {
+		t.Errorf("output missing control token stat error: %s", stdout.String())
+	}
+}
+
+func TestRunInitControlTokenWriteError(t *testing.T) {
+	var stdout bytes.Buffer
+	stubInitDeps(t, &stdout)
+
+	initCollectAnswers = func(answers *initAnswers) error {
+		*answers = initAnswers{BaseDomain: "tunnel.example.com", TLSAuto: true, RemoteControl: true}
+		return nil
+	}
+	writtenPaths := []string{}
+	initWriteFile = func(path string, _ []byte, _ os.FileMode) error {
+		writtenPaths = append(writtenPaths, path)
+		return os.ErrPermission
+	}
+
+	code := runInit()
+	if code != 1 {
+		t.Fatalf("runInit() = %d, want 1", code)
+	}
+	if len(writtenPaths) != 1 || writtenPaths[0] != "control-token" {
+		t.Errorf("written paths = %v, want only control-token", writtenPaths)
+	}
+	if !strings.Contains(stdout.String(), "Error writing control token file: permission denied") {
+		t.Errorf("output missing control token write error: %s", stdout.String())
+	}
+}
+
+func TestRunInitWarnsWhenNewTokenCleanupFails(t *testing.T) {
+	var stdout bytes.Buffer
+	stubInitDeps(t, &stdout)
+
+	initCollectAnswers = func(answers *initAnswers) error {
+		*answers = initAnswers{BaseDomain: "tunnel.example.com", TLSAuto: true, RemoteControl: true}
+		return nil
+	}
+	writes := 0
+	initWriteFile = func(string, []byte, os.FileMode) error {
+		writes++
+		if writes == 2 {
+			return os.ErrPermission
+		}
+		return nil
+	}
+	var removedPath string
+	initRemoveFile = func(path string) error {
+		removedPath = path
+		return os.ErrInvalid
+	}
+
+	code := runInit()
+	if code != 1 {
+		t.Fatalf("runInit() = %d, want 1", code)
+	}
+	if removedPath != "control-token" {
+		t.Errorf("removed path = %q, want control-token", removedPath)
+	}
+	if !strings.Contains(stdout.String(), "Warning: could not clean up control token file control-token: invalid argument") {
+		t.Errorf("output missing cleanup warning: %s", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "Error writing config: permission denied") {
+		t.Errorf("output missing config write error: %s", stdout.String())
+	}
+}
+
+func TestRunInitReusesExistingControlToken(t *testing.T) {
+	var stdout bytes.Buffer
+	stubInitDeps(t, &stdout)
+
+	initCollectAnswers = func(answers *initAnswers) error {
+		*answers = initAnswers{BaseDomain: "tunnel.example.com", TLSAuto: true, RemoteControl: true}
+		return nil
+	}
+	initStat = func(path string) (os.FileInfo, error) {
+		if path == "control-token" {
+			return nil, nil
+		}
+		return nil, os.ErrNotExist
+	}
+	initRandomReader = iotest.ErrReader(os.ErrInvalid)
+	var writtenPath string
+	var writtenData []byte
+	initWriteFile = func(path string, data []byte, _ os.FileMode) error {
+		writtenPath = path
+		writtenData = append([]byte(nil), data...)
+		return nil
+	}
+
+	code := runInit()
+	if code != 0 {
+		t.Fatalf("runInit() = %d, want 0; output:\n%s", code, stdout.String())
+	}
+	if writtenPath != "ratatosk.yaml" {
+		t.Errorf("written path = %q, want only ratatosk.yaml", writtenPath)
+	}
+	if !strings.Contains(string(writtenData), `control_token_file: "control-token"`) {
+		t.Errorf("config does not reuse existing control token path:\n%s", writtenData)
+	}
+	if !strings.Contains(stdout.String(), "Control token file: control-token") {
+		t.Errorf("output missing reused control token path: %s", stdout.String())
+	}
+}
+
+func TestRunInitDisablesIneligibleRemoteControl(t *testing.T) {
+	tests := []struct {
+		name       string
+		baseDomain string
+		tlsAuto    bool
+	}{
+		{name: "automatic TLS disabled", baseDomain: "tunnel.example.com", tlsAuto: false},
+		{name: "domain invalid", baseDomain: "localhost", tlsAuto: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout bytes.Buffer
+			stubInitDeps(t, &stdout)
+
+			initCollectAnswers = func(answers *initAnswers) error {
+				*answers = initAnswers{BaseDomain: tt.baseDomain, TLSAuto: tt.tlsAuto, RemoteControl: true}
+				return nil
+			}
+			var statPaths []string
+			initStat = func(path string) (os.FileInfo, error) {
+				statPaths = append(statPaths, path)
+				return nil, os.ErrNotExist
+			}
+			var writtenData []byte
+			initWriteFile = func(_ string, data []byte, _ os.FileMode) error {
+				writtenData = append([]byte(nil), data...)
+				return nil
+			}
+
+			code := runInit()
+			if code != 0 {
+				t.Fatalf("runInit() = %d, want 0; output:\n%s", code, stdout.String())
+			}
+			if len(statPaths) != 1 || statPaths[0] != "ratatosk.yaml" {
+				t.Errorf("stat paths = %v, want only ratatosk.yaml", statPaths)
+			}
+			if !strings.Contains(string(writtenData), "control_host: 127.0.0.1") {
+				t.Errorf("config exposes ineligible control plane:\n%s", writtenData)
+			}
+			if strings.Contains(stdout.String(), "Control token file:") {
+				t.Errorf("output reports token for ineligible control plane: %s", stdout.String())
+			}
+		})
+	}
+}
+
+func TestRunInitRemovesNewTokenWhenConfigWriteFails(t *testing.T) {
+	var stdout bytes.Buffer
+	stubInitDeps(t, &stdout)
+
+	initCollectAnswers = func(answers *initAnswers) error {
+		*answers = initAnswers{BaseDomain: "tunnel.example.com", TLSAuto: true, RemoteControl: true}
+		return nil
+	}
+	writes := 0
+	initWriteFile = func(string, []byte, os.FileMode) error {
+		writes++
+		if writes == 2 {
+			return os.ErrPermission
+		}
+		return nil
+	}
+	var removedPath string
+	initRemoveFile = func(path string) error {
+		removedPath = path
+		return nil
+	}
+
+	code := runInit()
+	if code != 1 {
+		t.Fatalf("runInit() = %d, want 1", code)
+	}
+	if removedPath != "control-token" {
+		t.Errorf("removed path = %q, want control-token", removedPath)
+	}
+	if !strings.Contains(stdout.String(), "Error writing config") {
+		t.Errorf("output missing config write error: %s", stdout.String())
+	}
+}
+
+func TestRunInitPreservesExistingTokenWhenConfigWriteFails(t *testing.T) {
+	var stdout bytes.Buffer
+	stubInitDeps(t, &stdout)
+
+	initCollectAnswers = func(answers *initAnswers) error {
+		*answers = initAnswers{BaseDomain: "tunnel.example.com", TLSAuto: true, RemoteControl: true}
+		return nil
+	}
+	initStat = func(path string) (os.FileInfo, error) {
+		if path == "ratatosk.yaml" || path == "control-token" {
+			return nil, nil
+		}
+		return nil, os.ErrNotExist
+	}
+	initConfirmOverwrite = func(string) (bool, error) { return true, nil }
+
+	existingToken := []byte("existing-control-token-must-survive\n")
+	currentToken := append([]byte(nil), existingToken...)
+	tokenWrites := 0
+	initWriteFile = func(path string, data []byte, _ os.FileMode) error {
+		switch path {
+		case "control-token":
+			tokenWrites++
+			currentToken = append(currentToken[:0], data...)
+			return nil
+		case "ratatosk.yaml":
+			return os.ErrPermission
+		default:
+			return nil
+		}
+	}
+
+	code := runInit()
+	if code != 1 {
+		t.Fatalf("runInit() = %d, want 1", code)
+	}
+	if tokenWrites != 0 {
+		t.Errorf("existing control token was rewritten %d time(s)", tokenWrites)
+	}
+	if !bytes.Equal(currentToken, existingToken) {
+		t.Fatalf("control token changed to %q after config write failure", currentToken)
+	}
+	if !strings.Contains(stdout.String(), "Error writing config") {
+		t.Errorf("output missing config write error: %s", stdout.String())
+	}
 }
 
 func TestRunInitRenderError(t *testing.T) {

@@ -16,8 +16,7 @@ ratatosk [command] [flags]
 | `ratatosk tcp <port>` | Expose a local TCP service (e.g., SSH, PostgreSQL) |
 | `ratatosk udp <port>` | Expose a local UDP service (e.g., game servers) |
 | `ratatosk --server host:port` | Connect to a specific relay server (default: `localhost:7000`) |
-| `ratatosk --token <token>` | Authenticate to the relay control plane |
-| `ratatosk --tls` | Enable verified TLS for the relay control plane |
+| `ratatosk --tls` | Force verified control-plane TLS for a loopback relay |
 | `ratatosk --ca <path>` | Add a custom CA for control-plane TLS |
 | `ratatosk --server-name <name>` | Override the control TLS certificate name |
 | `ratatosk --basic-auth user:pass` | Require HTTP Basic Auth for tunnel visitors |
@@ -40,7 +39,8 @@ Examples:
 
 ```sh
 ratatosk tcp 22                                    # Expose local SSH
-ratatosk tcp 5432 --server tunnel.example.com:7000 # Expose PostgreSQL
+RATATOSK_CONTROL_TOKEN_FILE="$HOME/.config/ratatosk/control-token" \
+  ratatosk tcp 5432 --server tunnel.example.com:7000 # Expose PostgreSQL remotely
 ```
 
 The `--server` flag and `RATATOSK_SERVER` environment variable work the same as with HTTP tunnels.
@@ -57,7 +57,8 @@ Examples:
 
 ```sh
 ratatosk udp 25565                                  # Expose Minecraft server
-ratatosk udp 27015 --server tunnel.example.com:7000 # Expose game server
+RATATOSK_CONTROL_TOKEN_FILE="$HOME/.config/ratatosk/control-token" \
+  ratatosk udp 27015 --server tunnel.example.com:7000 # Expose game server remotely
 ```
 
 ::: tip
@@ -75,6 +76,7 @@ The relay server address to connect to.
 - **Environment variable:** `RATATOSK_SERVER`
 
 ```sh
+export RATATOSK_CONTROL_TOKEN_FILE="$HOME/.config/ratatosk/control-token"
 ratatosk --server tunnel.example.com:7000 --port 3000
 ```
 
@@ -82,14 +84,26 @@ When pointing at a remote relay server (e.g., deployed on a VPS), this flag is r
 
 ### Control-Plane Security
 
-Remote relay servers require a pre-shared token and verified TLS:
+Remote relay addresses automatically use verified TLS and require exactly one shared-token source. The token must contain at least 32 bytes and is accepted only through `RATATOSK_CONTROL_TOKEN` or `RATATOSK_CONTROL_TOKEN_FILE`; there is no `--token` flag.
 
 ```sh
-ratatosk --server tunnel.example.com:7000 --port 3000 \
-  --token "$RATATOSK_CONTROL_TOKEN" --tls
+export RATATOSK_CONTROL_TOKEN_FILE="$HOME/.config/ratatosk/control-token"
+ratatosk --server tunnel.example.com:7000 --port 3000
 ```
 
-Use `--ca /path/to/ca.pem` for a private CA and `--server-name tunnel.example.com` when the dial address differs from the certificate name. The equivalent environment variables are `RATATOSK_CONTROL_TOKEN`, `RATATOSK_CONTROL_TLS_ENABLED`, `RATATOSK_CONTROL_CA_FILE`, and `RATATOSK_CONTROL_SERVER_NAME`. These flags also work with `tcp` and `udp` subcommands.
+Use `--ca /path/to/ca.pem` to add a private CA to the system trust pool. Use `--server-name tunnel.example.com` when the dial address differs from the name in the certificate. Certificate-chain and hostname verification are always enforced; Ratatosk has no insecure-skip-verification option.
+
+For a loopback relay, plaintext with no token is the default. `--tls` forces TLS for loopback and then requires a token. `--ca` and `--server-name` also enable TLS. These flags work with HTTP, `tcp`, and `udp` tunnels.
+
+| Environment variable | Purpose |
+|---|---|
+| `RATATOSK_CONTROL_TOKEN` | Inline shared control token |
+| `RATATOSK_CONTROL_TOKEN_FILE` | Path to a shared control-token file |
+| `RATATOSK_CONTROL_TLS_ENABLED` | Force control TLS when set to `true`, primarily for loopback |
+| `RATATOSK_CONTROL_CA_FILE` | Add a private CA certificate |
+| `RATATOSK_CONTROL_SERVER_NAME` | Override the certificate name to verify |
+
+Set exactly one of the two token variables whenever TLS is used. The CLI trims surrounding whitespace from the token or file contents.
 
 ### `--port`
 
@@ -105,6 +119,8 @@ ratatosk --port 8080
 ### `--basic-auth`
 
 Require HTTP Basic Authentication for all visitors to the tunnel. The relay server intercepts requests and demands credentials before any traffic is forwarded to your local service.
+
+This visitor credential is independent of the shared control token. `--basic-auth` protects access to one HTTP tunnel; it does not authenticate the CLI to the relay and is unrelated to the Cloudflare API token used by the server for DNS-01 challenges.
 
 - **Type:** string
 - **Default:** (empty -- no auth, tunnel is public)
@@ -208,5 +224,6 @@ ratatosk udp 25565
 Expose a database to a remote colleague:
 
 ```sh
+export RATATOSK_CONTROL_TOKEN_FILE="$HOME/.config/ratatosk/control-token"
 ratatosk tcp 5432 --server tunnel.example.com:7000
 ```

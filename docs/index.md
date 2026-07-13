@@ -22,7 +22,7 @@ features:
     details: Run on your own VPS. No third-party services, no usage limits, no vendor lock-in. Your infrastructure, your rules.
   - icon: "\u26A1"
     title: Fast Multiplexing
-    details: A single TCP connection handles thousands of concurrent requests using yamux multiplexing. Supports HTTP, TCP, and UDP tunnels -- no extra ports needed on your local router.
+    details: A verified TLS connection performs versioned shared-token authentication before yamux multiplexing. Supports HTTP, TCP, and UDP tunnels -- no extra ports needed on your local router.
   - icon: "\U0001F4CA"
     title: Built-in Dashboard
     details: Monitor active tunnels, bandwidth, and real-time traffic through an embedded React dashboard. No separate install required.

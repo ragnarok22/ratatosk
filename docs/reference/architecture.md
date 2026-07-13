@@ -10,7 +10,7 @@ Ratatosk is built as three logical components inside a Go monorepo:
 
 The relay server runs on a public VPS. It has four responsibilities:
 
-- **Control plane** (port 7000) -- accepts persistent TCP connections from CLI clients and manages tunnel registration.
+- **Control plane** (port 7000) -- accepts persistent client connections, applies required TLS and shared-token authentication, then manages tunnel registration over yamux. Literal loopback development binds may omit the security layers.
 - **Public HTTP proxy** (port 8080/443) -- receives incoming HTTP traffic and routes it to the correct tunnel based on the subdomain.
 - **TCP/UDP proxy** (ports 10000-20000) -- allocates dynamic ports for TCP and UDP tunnels and forwards raw traffic to the client via yamux streams.
 - **Admin API and Dashboard** (port 8081) -- serves the embedded React dashboard and exposes a REST/WebSocket API for monitoring.
@@ -20,11 +20,15 @@ The relay server runs on a public VPS. It has four responsibilities:
 The CLI client runs on the user's local machine or homelab. It:
 
 1. Dials the relay server over TCP on the control port.
-2. Wraps the connection in a [yamux](https://github.com/hashicorp/yamux) multiplexed session.
-3. Sends a tunnel request specifying the protocol (HTTP, TCP, or UDP) and local port.
-4. For **HTTP tunnels**: forwards incoming HTTP requests to a local port and runs a traffic inspector on `127.0.0.1:4300`.
-5. For **TCP tunnels**: accepts yamux streams and bidirectionally copies raw bytes to/from a local TCP service.
-6. For **UDP tunnels**: accepts yamux streams, reads length-prefixed frames, and forwards them as UDP datagrams to a local service.
+2. For a remote relay, performs a verified TLS handshake automatically. TLS can also be forced for loopback.
+3. When TLS is active, exchanges a versioned authentication record using the shared control token.
+4. Only after authentication succeeds, wraps the connection in a [yamux](https://github.com/hashicorp/yamux) multiplexed session.
+5. Sends a tunnel request specifying the protocol (HTTP, TCP, or UDP) and local port.
+6. For **HTTP tunnels**: forwards incoming HTTP requests to a local port and runs a traffic inspector on `127.0.0.1:4300`.
+7. For **TCP tunnels**: accepts yamux streams and bidirectionally copies raw bytes to/from a local TCP service.
+8. For **UDP tunnels**: accepts yamux streams, reads length-prefixed frames, and forwards them as UDP datagrams to a local service.
+
+The control connection stack is `TCP -> TLS -> versioned shared-token authentication -> yamux`. The only exception is a server listener bound to a literal loopback IP with control TLS disabled; that local development mode is `TCP -> yamux` with no token. Remote plaintext, unauthenticated remote control connections, and insecure certificate verification are not supported.
 
 ### Dashboard
 
@@ -43,16 +47,16 @@ HTTP request ──────► │ Public Proxy │
                      └──────┬───────┘
                             │ route by subdomain
                      ┌──────▼───────┐
-                     │ yamux stream │◄────── single TCP connection ──────► CLI Client
+                     │ yamux stream │◄──── TLS + auth over one TCP conn ─► CLI Client
                      │  (port 7000) │                                     (ratatosk)
                      └──────────────┘                                         │
                                                                               ▼
                                                                      localhost:3000
 ```
 
-1. The CLI client dials the relay server over TCP and wraps the connection in a yamux multiplexed session.
-2. Multiple logical streams run over this single TCP connection -- no extra ports needed on the local router.
-3. The relay server accepts public HTTP traffic and routes it through the appropriate yamux stream back to the client, which forwards it to your local service.
+1. The CLI client dials the relay server over TCP, verifies TLS, authenticates with the versioned shared-token exchange, and then creates a yamux session.
+2. Multiple logical streams run over this secured connection -- no extra ports needed on the local router.
+3. The relay server accepts public HTTP traffic and routes it through the appropriate yamux stream back to the client, which forwards it to your local service. Optional visitor Basic Auth is checked at the public proxy and is separate from control authentication.
 
 ### TCP/UDP Tunnels
 
@@ -65,7 +69,7 @@ TCP/UDP traffic ───► │ Dynamic Port │
                      └──────┬───────┘
                             │ raw bytes (TCP) or framed datagrams (UDP)
                      ┌──────▼───────┐
-                     │ yamux stream │◄────── single TCP connection ──────► CLI Client
+                     │ yamux stream │◄──── TLS + auth over one TCP conn ─► CLI Client
                      │  (port 7000) │                                     (ratatosk)
                      └──────────────┘                                         │
                                                                               ▼
@@ -100,6 +104,7 @@ ratatosk/
 
 - **Go** for the server and CLI -- high concurrency via goroutines, raw TCP socket control, and single static binary output.
 - **yamux** for multiplexing -- battle-tested library from HashiCorp that turns one TCP connection into many logical streams.
+- **Authenticated TLS before multiplexing** -- the relay verifies a versioned shared-token exchange inside TLS before untrusted input reaches yamux; clients always verify certificates.
 - **`go:embed`** for the dashboard -- the entire frontend ships inside the server binary. No Node.js runtime needed in production.
 - **In-memory state** -- tunnel registry uses Go maps protected by `sync.RWMutex`. No external database for the core tunneling functionality.
 - **Port allocation** -- TCP/UDP tunnels use a random-probing allocator within a configurable range, avoiding predictable port assignments.

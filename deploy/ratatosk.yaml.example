@@ -27,12 +27,17 @@ admin_tls_enabled: false
 admin_tls_cert_file: ""
 admin_tls_key_file: ""
 
-# Keep the control plane local-only for development. A non-loopback binding
-# requires a token and a verified TLS certificate/key pair.
+# Keep the control plane local-only for plaintext development. A non-loopback
+# binding requires TLS and exactly one of control_token or control_token_file.
 control_host: 127.0.0.1
 control_port: 7000
 control_token: ""
+control_token_file: ""
 control_tls_enabled: false
+
+# A dedicated control-plane certificate is optional. Configure both files or
+# neither. When omitted, control TLS reuses the public manual certificate or
+# the certificate managed by CertMagic (tls_auto).
 control_tls_cert_file: ""
 control_tls_key_file: ""
 

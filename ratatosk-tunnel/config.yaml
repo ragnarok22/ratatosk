@@ -14,6 +14,7 @@ init: false
 options:
   server: ""
   control_token: ""
+  # Remote relay addresses always use TLS; this also forces TLS for loopback.
   control_tls: true
   control_ca_file: ""
   control_server_name: ""

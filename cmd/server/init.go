@@ -2,6 +2,9 @@ package main
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -19,7 +22,10 @@ var (
 	initMkdirAll                   = os.MkdirAll
 	initStat                       = os.Stat
 	initRunForm                    = func(f *huh.Form) error { return f.Run() }
+	initCollectAnswers             = collectInitAnswers
 	initConfirmOverwrite           = confirmOverwrite
+	initRandomReader     io.Reader = rand.Reader
+	initRemoveFile                 = os.Remove
 	initStdout           io.Writer = os.Stdout
 )
 
@@ -69,11 +75,13 @@ func confirmOverwrite(path string) (bool, error) {
 }
 
 type initAnswers struct {
-	BaseDomain  string
-	TLSAuto     bool
-	TLSEmail    string
-	TLSProvider string
-	TLSAPIToken string
+	BaseDomain       string
+	TLSAuto          bool
+	TLSEmail         string
+	TLSProvider      string
+	TLSAPIToken      string
+	RemoteControl    bool
+	ControlTokenFile string
 }
 
 const configTemplate = `# Ratatosk Relay Server Configuration
@@ -82,12 +90,24 @@ const configTemplate = `# Ratatosk Relay Server Configuration
 
 base_domain: {{ printf "%q" .BaseDomain }}
 public_port: {{ if .TLSAuto }}443{{ else }}8080{{ end }}
-# Admin and control stay local-only until remote authentication and control
-# TLS settings are explicitly configured.
+# The admin dashboard stays local-only by default.
 admin_host: 127.0.0.1
 admin_port: 8081
+{{ if .RemoteControl }}# Remote control plane secured by a generated token and public automatic TLS
+control_host: 0.0.0.0
+control_port: 7000
+control_tls_enabled: true
+control_tls_cert_file: ""
+control_tls_key_file: ""
+control_token_file: {{ printf "%q" .ControlTokenFile }}
+{{ else }}# Local plaintext control plane
 control_host: 127.0.0.1
 control_port: 7000
+control_tls_enabled: false
+control_tls_cert_file: ""
+control_tls_key_file: ""
+control_token_file: ""
+{{ end }}
 {{ if .TLSAuto }}
 # Automatic TLS via Let's Encrypt DNS-01 (managed by certmagic)
 tls_auto: true
@@ -143,6 +163,18 @@ func validateAPIToken(s string) error {
 	return nil
 }
 
+func canExposeControlRemotely(answers initAnswers) bool {
+	return answers.TLSAuto && validateDomain(answers.BaseDomain) == nil
+}
+
+func generateControlToken(reader io.Reader) (string, error) {
+	random := make([]byte, 32)
+	if _, err := io.ReadFull(reader, random); err != nil {
+		return "", fmt.Errorf("reading random bytes: %w", err)
+	}
+	return base64.StdEncoding.EncodeToString(random), nil
+}
+
 func configDir() string {
 	if initGetEUID() == 0 {
 		return "/etc/ratatosk"
@@ -150,14 +182,7 @@ func configDir() string {
 	return "."
 }
 
-func runInit() int {
-	fmt.Fprintln(initStdout, "")
-	fmt.Fprintln(initStdout, "  Ratatosk Server Setup Wizard")
-	fmt.Fprintln(initStdout, "  ============================")
-	fmt.Fprintln(initStdout, "")
-
-	var answers initAnswers
-
+func collectInitAnswers(answers *initAnswers) error {
 	form := huh.NewForm(
 		huh.NewGroup(
 			huh.NewInput().
@@ -196,9 +221,28 @@ func runInit() int {
 				Value(&answers.TLSAPIToken).
 				Validate(validateAPIToken),
 		).WithHideFunc(func() bool { return !answers.TLSAuto }),
+		huh.NewGroup(
+			huh.NewConfirm().
+				Title("Expose the control plane to remote clients?").
+				Description("Production mode: binds publicly with a generated token and automatic TLS.").
+				Affirmative("Yes").
+				Negative("No").
+				Value(&answers.RemoteControl),
+		).WithHideFunc(func() bool { return !canExposeControlRemotely(*answers) }),
 	)
 
-	if err := initRunForm(form); err != nil {
+	return initRunForm(form)
+}
+
+func runInit() int {
+	fmt.Fprintln(initStdout, "")
+	fmt.Fprintln(initStdout, "  Ratatosk Server Setup Wizard")
+	fmt.Fprintln(initStdout, "  ============================")
+	fmt.Fprintln(initStdout, "")
+
+	var answers initAnswers
+
+	if err := initCollectAnswers(&answers); err != nil {
 		if err == huh.ErrUserAborted {
 			fmt.Fprintln(initStdout, "\n  Setup cancelled.")
 			return 0
@@ -210,15 +254,15 @@ func runInit() int {
 	answers.BaseDomain = strings.TrimSpace(answers.BaseDomain)
 	answers.TLSEmail = strings.TrimSpace(answers.TLSEmail)
 	answers.TLSAPIToken = strings.TrimSpace(answers.TLSAPIToken)
-
-	data, err := renderConfig(initConfigTmpl, answers)
-	if err != nil {
-		fmt.Fprintf(initStdout, "\n  Error generating config: %v\n", err)
-		return 1
+	if !canExposeControlRemotely(answers) {
+		answers.RemoteControl = false
 	}
 
 	dir := configDir()
 	outPath := filepath.Join(dir, "ratatosk.yaml")
+	if answers.RemoteControl {
+		answers.ControlTokenFile = filepath.Join(dir, "control-token")
+	}
 
 	if _, err := initStat(outPath); err == nil {
 		overwrite, err := initConfirmOverwrite(outPath)
@@ -232,13 +276,52 @@ func runInit() int {
 		}
 	}
 
+	var tokenData []byte
+	tokenWasAbsent := false
+	if answers.RemoteControl {
+		_, err := initStat(answers.ControlTokenFile)
+		switch {
+		case err == nil:
+		case errors.Is(err, fs.ErrNotExist):
+			tokenWasAbsent = true
+			token, err := generateControlToken(initRandomReader)
+			if err != nil {
+				fmt.Fprintf(initStdout, "\n  Error generating control token: %v\n", err)
+				return 1
+			}
+			tokenData = []byte(token + "\n")
+		default:
+			fmt.Fprintf(initStdout, "\n  Error checking control token file %s: %v\n", answers.ControlTokenFile, err)
+			return 1
+		}
+	}
+
+	data, err := renderConfig(initConfigTmpl, answers)
+	if err != nil {
+		fmt.Fprintf(initStdout, "\n  Error generating config: %v\n", err)
+		return 1
+	}
+
 	if err := initMkdirAll(dir, 0755); err != nil {
 		fmt.Fprintf(initStdout, "\n  Error creating directory %s: %v\n", dir, err)
 		fmt.Fprintln(initStdout, "  Hint: try running with sudo if writing to /etc/ratatosk/")
 		return 1
 	}
 
+	if answers.RemoteControl && tokenWasAbsent {
+		if err := initWriteFile(answers.ControlTokenFile, tokenData, fs.FileMode(0600)); err != nil {
+			fmt.Fprintf(initStdout, "\n  Error writing control token file: %v\n", err)
+			fmt.Fprintln(initStdout, "  Hint: try running with sudo if writing to /etc/ratatosk/")
+			return 1
+		}
+	}
+
 	if err := initWriteFile(outPath, data, fs.FileMode(0600)); err != nil {
+		if answers.RemoteControl && tokenWasAbsent {
+			if cleanupErr := initRemoveFile(answers.ControlTokenFile); cleanupErr != nil && !errors.Is(cleanupErr, fs.ErrNotExist) {
+				fmt.Fprintf(initStdout, "  Warning: could not clean up control token file %s: %v\n", answers.ControlTokenFile, cleanupErr)
+			}
+		}
 		fmt.Fprintf(initStdout, "\n  Error writing config: %v\n", err)
 		fmt.Fprintln(initStdout, "  Hint: try running with sudo if writing to /etc/ratatosk/")
 		return 1
@@ -250,6 +333,9 @@ func runInit() int {
 	fmt.Fprintln(initStdout, "  =======================================")
 	fmt.Fprintln(initStdout, "")
 	fmt.Fprintf(initStdout, "  Config file: %s\n", outPath)
+	if answers.RemoteControl {
+		fmt.Fprintf(initStdout, "  Control token file: %s\n", answers.ControlTokenFile)
+	}
 	fmt.Fprintln(initStdout, "")
 	fmt.Fprintln(initStdout, "  Next steps:")
 	fmt.Fprintln(initStdout, "    1. Make sure your DNS records are configured")

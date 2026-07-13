@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"ratatosk/internal/control"
 	"ratatosk/internal/inspector"
 	"ratatosk/internal/protocol"
 	"ratatosk/internal/redact"
@@ -26,7 +27,7 @@ import (
 var Version = "dev"
 
 type controlOptions struct {
-	AuthToken  string
+	Token      string
 	TLS        bool
 	CAFile     string
 	ServerName string
@@ -46,6 +47,7 @@ var (
 	cliInspectorHost              = "127.0.0.1"
 	cliResolveUDPAddr             = net.ResolveUDPAddr
 	cliDialUDP                    = net.DialUDP
+	cliSetDeadline                = func(conn net.Conn, deadline time.Time) error { return conn.SetDeadline(deadline) }
 	cliControlOptions   controlOptions
 	cliHandshakeTimeout = 10 * time.Second
 )
@@ -142,7 +144,12 @@ func runHTTPCommand(
 
 	redact.Enabled = *streamer
 	cliInspectorHost = *inspectorHost
-	cliControlOptions = security.options()
+	options, err := security.options(*server)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
+	}
+	cliControlOptions = options
 	slog.SetDefault(slog.New(redact.NewHandler(slog.NewTextHandler(stdout, nil))))
 
 	if err := runClientFn(*server, *port, *basicAuth); err != nil {
@@ -206,7 +213,12 @@ func runProtoCommand(
 	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(stdout, nil)))
-	cliControlOptions = security.options()
+	options, err := security.options(*server)
+	if err != nil {
+		fmt.Fprintf(stderr, "Error: %v\n", err)
+		return 1
+	}
+	cliControlOptions = options
 
 	if err := runRawClientFn(*server, port, proto); err != nil {
 		slog.Error("client error", "error", err)
@@ -221,7 +233,7 @@ func reorderProtoArgs(args []string) []string {
 
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if arg == "--server" || arg == "-server" || arg == "--token" || arg == "-token" || arg == "--ca" || arg == "-ca" || arg == "--server-name" || arg == "-server-name" {
+		if arg == "--server" || arg == "-server" || arg == "--ca" || arg == "-ca" || arg == "--server-name" || arg == "-server-name" {
 			flagArgs = append(flagArgs, arg)
 			if i+1 < len(args) {
 				flagArgs = append(flagArgs, args[i+1])
@@ -229,7 +241,7 @@ func reorderProtoArgs(args []string) []string {
 			}
 			continue
 		}
-		if strings.HasPrefix(arg, "--server=") || strings.HasPrefix(arg, "-server=") || strings.HasPrefix(arg, "--token=") || strings.HasPrefix(arg, "-token=") || strings.HasPrefix(arg, "--ca=") || strings.HasPrefix(arg, "-ca=") || strings.HasPrefix(arg, "--server-name=") || strings.HasPrefix(arg, "-server-name=") || strings.HasPrefix(arg, "--tls=") || strings.HasPrefix(arg, "-tls=") || arg == "--tls" || arg == "-tls" {
+		if strings.HasPrefix(arg, "--server=") || strings.HasPrefix(arg, "-server=") || strings.HasPrefix(arg, "--ca=") || strings.HasPrefix(arg, "-ca=") || strings.HasPrefix(arg, "--server-name=") || strings.HasPrefix(arg, "-server-name=") || strings.HasPrefix(arg, "--tls=") || strings.HasPrefix(arg, "-tls=") || arg == "--tls" || arg == "-tls" {
 			flagArgs = append(flagArgs, arg)
 			continue
 		}
@@ -240,7 +252,8 @@ func reorderProtoArgs(args []string) []string {
 }
 
 type controlFlagValues struct {
-	token      *string
+	token      string
+	tokenFile  string
 	tls        *bool
 	caFile     *string
 	serverName *string
@@ -248,14 +261,14 @@ type controlFlagValues struct {
 
 func addControlFlags(flags *flag.FlagSet, getenv func(string) string) (controlFlagValues, error) {
 	tlsEnabled := false
-	tlsValue := getenv("RATATOSK_CONTROL_TLS_ENABLED")
+	tlsValue := getenv("RATATOSK_CONTROL_TLS")
 	if tlsValue == "" {
-		tlsValue = getenv("RATATOSK_TLS")
+		tlsValue = getenv("RATATOSK_CONTROL_TLS_ENABLED")
 	}
 	if tlsValue != "" {
 		parsed, err := strconv.ParseBool(tlsValue)
 		if err != nil {
-			return controlFlagValues{}, fmt.Errorf("RATATOSK_CONTROL_TLS_ENABLED must be a boolean")
+			return controlFlagValues{}, fmt.Errorf("control TLS environment value must be a boolean")
 		}
 		tlsEnabled = parsed
 	}
@@ -263,6 +276,7 @@ func addControlFlags(flags *flag.FlagSet, getenv func(string) string) (controlFl
 	if token == "" {
 		token = getenv("RATATOSK_AUTH_TOKEN")
 	}
+	tokenFile := getenv("RATATOSK_CONTROL_TOKEN_FILE")
 	caFile := getenv("RATATOSK_CONTROL_CA_FILE")
 	if caFile == "" {
 		caFile = getenv("RATATOSK_CA")
@@ -272,15 +286,39 @@ func addControlFlags(flags *flag.FlagSet, getenv func(string) string) (controlFl
 		serverName = getenv("RATATOSK_SERVER_NAME")
 	}
 	return controlFlagValues{
-		token:      flags.String("token", token, "control-plane pre-shared token"),
+		token:      token,
+		tokenFile:  tokenFile,
 		tls:        flags.Bool("tls", tlsEnabled, "verify the relay control-plane TLS certificate"),
 		caFile:     flags.String("ca", caFile, "custom CA certificate for control-plane TLS"),
 		serverName: flags.String("server-name", serverName, "TLS server name override"),
 	}, nil
 }
 
-func (values controlFlagValues) options() controlOptions {
-	return controlOptions{AuthToken: *values.token, TLS: *values.tls, CAFile: *values.caFile, ServerName: *values.serverName}
+func (values controlFlagValues) options(serverAddr string) (controlOptions, error) {
+	tlsEnabled := *values.tls || *values.caFile != "" || *values.serverName != "" || !isLoopbackRelay(serverAddr)
+	if !tlsEnabled {
+		if values.token != "" || values.tokenFile != "" {
+			return controlOptions{}, errors.New("control tokens require TLS")
+		}
+		return controlOptions{}, nil
+	}
+	token, err := control.LoadToken(values.token, values.tokenFile)
+	if err != nil {
+		return controlOptions{}, err
+	}
+	return controlOptions{Token: token, TLS: true, CAFile: *values.caFile, ServerName: *values.serverName}, nil
+}
+
+func isLoopbackRelay(serverAddr string) bool {
+	host, _, err := net.SplitHostPort(serverAddr)
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 func buildControlTLSConfig(serverAddr, caFile, serverName string) (*tls.Config, error) {
@@ -326,7 +364,7 @@ func connectAndHandshake(serverAddr string, tunnelReq *protocol.TunnelRequest) (
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("failed to connect to relay server at %s: %w", serverAddr, err)
 	}
-	if err := conn.SetDeadline(time.Now().Add(cliHandshakeTimeout)); err != nil {
+	if err := cliSetDeadline(conn, time.Now().Add(cliHandshakeTimeout)); err != nil {
 		conn.Close()
 		return nil, nil, nil, fmt.Errorf("setting handshake deadline: %w", err)
 	}
@@ -337,6 +375,14 @@ func connectAndHandshake(serverAddr string, tunnelReq *protocol.TunnelRequest) (
 			return nil, nil, nil, fmt.Errorf("control TLS handshake failed: %w", err)
 		}
 		conn = tlsConn
+		if err := control.AuthenticateAsClient(conn, cliControlOptions.Token, cliHandshakeTimeout); err != nil {
+			conn.Close()
+			return nil, nil, nil, fmt.Errorf("control authentication failed: %w", err)
+		}
+		if err := cliSetDeadline(conn, time.Now().Add(cliHandshakeTimeout)); err != nil {
+			conn.Close()
+			return nil, nil, nil, fmt.Errorf("restoring handshake deadline: %w", err)
+		}
 	}
 	slog.Info("connected to relay server", "addr", serverAddr)
 
@@ -374,7 +420,7 @@ func connectAndHandshake(serverAddr string, tunnelReq *protocol.TunnelRequest) (
 		conn.Close()
 		return nil, nil, nil, fmt.Errorf("tunnel creation failed: %s", resp.Error)
 	}
-	if err := conn.SetDeadline(time.Time{}); err != nil {
+	if err := cliSetDeadline(conn, time.Time{}); err != nil {
 		session.Close()
 		conn.Close()
 		return nil, nil, nil, fmt.Errorf("clearing handshake deadline: %w", err)
@@ -423,7 +469,7 @@ func acceptHTTPStreams(session *yamux.Session, localAddr string, logger *inspect
 }
 
 func runClient(serverAddr string, localPort int, basicAuth string) error {
-	tunnelReq := &protocol.TunnelRequest{Protocol: protocol.ProtoHTTP, LocalPort: localPort, BasicAuth: basicAuth, AuthToken: cliControlOptions.AuthToken}
+	tunnelReq := &protocol.TunnelRequest{Protocol: protocol.ProtoHTTP, LocalPort: localPort, BasicAuth: basicAuth}
 	conn, session, resp, err := connectAndHandshake(serverAddr, tunnelReq)
 	if err != nil {
 		return err
@@ -459,7 +505,7 @@ func handleStream(stream net.Conn, localAddr string, logger *inspector.Logger) {
 
 func runRawClient(serverAddr string, localPort int, proto string) error {
 	localAddr := fmt.Sprintf("localhost:%d", localPort)
-	req := &protocol.TunnelRequest{Protocol: proto, LocalPort: localPort, AuthToken: cliControlOptions.AuthToken}
+	req := &protocol.TunnelRequest{Protocol: proto, LocalPort: localPort}
 	conn, session, resp, err := connectAndHandshake(serverAddr, req)
 	if err != nil {
 		return err

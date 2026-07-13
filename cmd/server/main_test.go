@@ -3,14 +3,25 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"io/fs"
+	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +30,7 @@ import (
 
 	autocert "ratatosk/internal/certmagic"
 	"ratatosk/internal/config"
+	"ratatosk/internal/control"
 	"ratatosk/internal/inspector"
 	"ratatosk/internal/protocol"
 	"ratatosk/internal/tunnel"
@@ -41,6 +53,67 @@ func (a fixedPortAllocator) Allocate() (int, error) {
 }
 
 func (fixedPortAllocator) Release(int) {}
+
+type fakeCertificateManager struct {
+	tlsConfig *tls.Config
+	serve     func(http.Handler) error
+}
+
+func (m *fakeCertificateManager) TLSConfig() *tls.Config {
+	return m.tlsConfig
+}
+
+func (m *fakeCertificateManager) Serve(handler http.Handler) error {
+	if m.serve == nil {
+		return nil
+	}
+	return m.serve(handler)
+}
+
+func generateTestCertificate(t *testing.T) (tls.Certificate, string, string) {
+	t.Helper()
+
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatalf("GenerateKey: %v", err)
+	}
+	template := &x509.Certificate{
+		SerialNumber:          big.NewInt(1),
+		Subject:               pkix.Name{CommonName: "localhost"},
+		NotBefore:             time.Now().Add(-time.Hour),
+		NotAfter:              time.Now().Add(time.Hour),
+		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
+		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{"localhost"},
+	}
+	certificateDER, err := x509.CreateCertificate(rand.Reader, template, template, &privateKey.PublicKey, privateKey)
+	if err != nil {
+		t.Fatalf("CreateCertificate: %v", err)
+	}
+	privateKeyDER, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		t.Fatalf("MarshalPKCS8PrivateKey: %v", err)
+	}
+
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certificateDER})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateKeyDER})
+	dir := t.TempDir()
+	certFile := filepath.Join(dir, "cert.pem")
+	keyFile := filepath.Join(dir, "key.pem")
+	if err := os.WriteFile(certFile, certPEM, 0o600); err != nil {
+		t.Fatalf("WriteFile certificate: %v", err)
+	}
+	if err := os.WriteFile(keyFile, keyPEM, 0o600); err != nil {
+		t.Fatalf("WriteFile private key: %v", err)
+	}
+
+	certificate, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("X509KeyPair: %v", err)
+	}
+	return certificate, certFile, keyFile
+}
 
 // freePort finds an available TCP port by binding to :0 and returning
 // the port the OS assigned. This avoids hardcoded ports that may be
@@ -140,6 +213,275 @@ func (l *errorThenCloseListener) Close() error {
 
 func (l *errorThenCloseListener) Addr() net.Addr {
 	return stubAddr("127.0.0.1:0")
+}
+
+type singleConnListener struct {
+	conn      net.Conn
+	closed    chan struct{}
+	closeOnce sync.Once
+	mu        sync.Mutex
+	sent      bool
+}
+
+func newSingleConnListener(conn net.Conn) *singleConnListener {
+	return &singleConnListener{
+		conn:   conn,
+		closed: make(chan struct{}),
+	}
+}
+
+func (l *singleConnListener) Accept() (net.Conn, error) {
+	l.mu.Lock()
+	if !l.sent {
+		l.sent = true
+		l.mu.Unlock()
+		return l.conn, nil
+	}
+	l.mu.Unlock()
+
+	<-l.closed
+	return nil, net.ErrClosed
+}
+
+func (l *singleConnListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (l *singleConnListener) Addr() net.Addr {
+	return stubAddr("127.0.0.1:0")
+}
+
+type trackingConn struct {
+	net.Conn
+	closed       chan struct{}
+	deadlineSet  chan struct{}
+	closeOnce    sync.Once
+	deadlineOnce sync.Once
+}
+
+func newTrackingConn(conn net.Conn) *trackingConn {
+	return &trackingConn{
+		Conn:        conn,
+		closed:      make(chan struct{}),
+		deadlineSet: make(chan struct{}),
+	}
+}
+
+func (c *trackingConn) Close() error {
+	err := c.Conn.Close()
+	c.closeOnce.Do(func() { close(c.closed) })
+	return err
+}
+
+func (c *trackingConn) SetDeadline(deadline time.Time) error {
+	c.deadlineOnce.Do(func() { close(c.deadlineSet) })
+	return c.Conn.SetDeadline(deadline)
+}
+
+type deadlineErrorConn struct {
+	net.Conn
+	err error
+}
+
+func (c deadlineErrorConn) SetDeadline(time.Time) error {
+	return c.err
+}
+
+type deadlineSequenceConn struct {
+	net.Conn
+	mu      sync.Mutex
+	calls   int
+	failAt  int
+	failErr error
+}
+
+func (c *deadlineSequenceConn) SetDeadline(deadline time.Time) error {
+	c.mu.Lock()
+	c.calls++
+	call := c.calls
+	c.mu.Unlock()
+	if call == c.failAt {
+		return c.failErr
+	}
+	return c.Conn.SetDeadline(deadline)
+}
+
+type controlTestConn struct {
+	closed        chan struct{}
+	readCalled    chan struct{}
+	remoteCalled  chan struct{}
+	remoteRelease <-chan struct{}
+	closeOnce     sync.Once
+	readOnce      sync.Once
+	remoteOnce    sync.Once
+}
+
+func newControlTestConn(remoteRelease <-chan struct{}) *controlTestConn {
+	return &controlTestConn{
+		closed:        make(chan struct{}),
+		readCalled:    make(chan struct{}),
+		remoteCalled:  make(chan struct{}),
+		remoteRelease: remoteRelease,
+	}
+}
+
+func (c *controlTestConn) Read([]byte) (int, error) {
+	c.readOnce.Do(func() { close(c.readCalled) })
+	<-c.closed
+	return 0, net.ErrClosed
+}
+
+func (c *controlTestConn) Write(payload []byte) (int, error) {
+	select {
+	case <-c.closed:
+		return 0, net.ErrClosed
+	default:
+		return len(payload), nil
+	}
+}
+
+func (c *controlTestConn) Close() error {
+	c.closeOnce.Do(func() { close(c.closed) })
+	return nil
+}
+
+func (c *controlTestConn) LocalAddr() net.Addr {
+	return stubAddr("127.0.0.1:7000")
+}
+
+func (c *controlTestConn) RemoteAddr() net.Addr {
+	c.remoteOnce.Do(func() { close(c.remoteCalled) })
+	if c.remoteRelease != nil {
+		<-c.remoteRelease
+	}
+	return stubAddr("127.0.0.1:40000")
+}
+
+func (c *controlTestConn) SetDeadline(time.Time) error {
+	return nil
+}
+
+func (*controlTestConn) SetReadDeadline(time.Time) error {
+	return nil
+}
+
+func (*controlTestConn) SetWriteDeadline(time.Time) error {
+	return nil
+}
+
+type controlTestListener struct {
+	connections chan net.Conn
+	closed      chan struct{}
+	closeOnce   sync.Once
+}
+
+func newControlTestListener() *controlTestListener {
+	return &controlTestListener{
+		connections: make(chan net.Conn),
+		closed:      make(chan struct{}),
+	}
+}
+
+func (l *controlTestListener) Accept() (net.Conn, error) {
+	select {
+	case conn := <-l.connections:
+		return conn, nil
+	case <-l.closed:
+		return nil, net.ErrClosed
+	}
+}
+
+func (l *controlTestListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (*controlTestListener) Addr() net.Addr {
+	return stubAddr("127.0.0.1:7000")
+}
+
+type closeAcceptListener struct {
+	initial   []net.Conn
+	final     net.Conn
+	closed    chan struct{}
+	closeOnce sync.Once
+	next      int
+}
+
+func (l *closeAcceptListener) Accept() (net.Conn, error) {
+	if l.next < len(l.initial) {
+		conn := l.initial[l.next]
+		l.next++
+		return conn, nil
+	}
+	if l.next == len(l.initial) {
+		<-l.closed
+		l.next++
+		return l.final, nil
+	}
+	return nil, net.ErrClosed
+}
+
+func (l *closeAcceptListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (*closeAcceptListener) Addr() net.Addr {
+	return stubAddr("127.0.0.1:7000")
+}
+
+type notifiedAcceptError struct {
+	notify chan struct{}
+	once   *sync.Once
+}
+
+func (e notifiedAcceptError) Error() string {
+	if e.notify != nil {
+		e.once.Do(func() { close(e.notify) })
+	}
+	return "accept failed"
+}
+
+type repeatedErrorListener struct {
+	closed     chan struct{}
+	closeOnce  sync.Once
+	calls      int
+	notifyCall int
+	notify     chan struct{}
+	notifyOnce sync.Once
+}
+
+func (l *repeatedErrorListener) Accept() (net.Conn, error) {
+	select {
+	case <-l.closed:
+		return nil, net.ErrClosed
+	default:
+	}
+	l.calls++
+	if l.calls == l.notifyCall {
+		return nil, notifiedAcceptError{notify: l.notify, once: &l.notifyOnce}
+	}
+	return nil, notifiedAcceptError{}
+}
+
+func (l *repeatedErrorListener) Close() error {
+	l.closeOnce.Do(func() { close(l.closed) })
+	return nil
+}
+
+func (*repeatedErrorListener) Addr() net.Addr {
+	return stubAddr("127.0.0.1:7000")
+}
+
+func waitForTestEvent(t *testing.T, event <-chan struct{}, failure string) {
+	t.Helper()
+	select {
+	case <-event:
+	case <-time.After(5 * time.Second):
+		t.Fatal(failure)
+	}
 }
 
 func newLoopbackServer(t *testing.T, handler http.Handler) *httptest.Server {
@@ -330,6 +672,82 @@ func TestStartControlPlaneAcceptError(t *testing.T) {
 	t.Fatal("accept loop did not observe listener error")
 }
 
+func TestStartControlPlaneShutdownClosesAcceptedConnections(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	cfg = &config.ServerConfig{ControlPort: 7000}
+	controlTLSConfig = nil
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+	})
+
+	clientConn, serverConn := net.Pipe()
+	trackedConn := newTrackingConn(serverConn)
+	listener := newSingleConnListener(trackedConn)
+	stop := make(chan struct{})
+	t.Cleanup(func() { clientConn.Close() })
+
+	if err := startControlPlane(stop, func(string, string) (net.Listener, error) {
+		return listener, nil
+	}); err != nil {
+		t.Fatalf("startControlPlane: %v", err)
+	}
+
+	select {
+	case <-trackedConn.deadlineSet:
+	case <-time.After(time.Second):
+		t.Fatal("accepted connection was not handed to the control handler")
+	}
+	close(stop)
+
+	select {
+	case <-trackedConn.closed:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not close the accepted control connection")
+	}
+	select {
+	case <-listener.closed:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not close the control listener")
+	}
+}
+
+func TestStartControlPlaneRejectsUnsecuredTLSConnection(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	cfg = &config.ServerConfig{ControlPort: 7000, ControlTLSEnabled: true}
+	controlTLSConfig = nil
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+	})
+
+	clientConn, serverConn := net.Pipe()
+	trackedConn := newTrackingConn(serverConn)
+	listener := newSingleConnListener(trackedConn)
+	stop := make(chan struct{})
+	t.Cleanup(func() { clientConn.Close() })
+
+	if err := startControlPlane(stop, func(string, string) (net.Listener, error) {
+		return listener, nil
+	}); err != nil {
+		t.Fatalf("startControlPlane: %v", err)
+	}
+
+	select {
+	case <-trackedConn.closed:
+	case <-time.After(time.Second):
+		t.Fatal("TLS connection was not rejected when security was uninitialized")
+	}
+	close(stop)
+	select {
+	case <-listener.closed:
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not close the control listener")
+	}
+}
+
 func TestRunMainStartControlPlaneError(t *testing.T) {
 	oldCfg := cfg
 	oldStartControlPlane := serverStartControlPlane
@@ -368,6 +786,56 @@ func TestRunMainStartControlPlaneError(t *testing.T) {
 
 	if code != 1 {
 		t.Fatalf("code = %d, want 1", code)
+	}
+}
+
+func TestRunMainReturnsErrorWhenSecurityInitializationFails(t *testing.T) {
+	oldCfg := cfg
+	oldNewManager := mainNewCertmagicManager
+	oldStartControlPlane := serverStartControlPlane
+	oldStartAdminServer := serverStartAdminServer
+	oldStartPublicServer := serverStartPublicServer
+	t.Cleanup(func() {
+		cfg = oldCfg
+		mainNewCertmagicManager = oldNewManager
+		serverStartControlPlane = oldStartControlPlane
+		serverStartAdminServer = oldStartAdminServer
+		serverStartPublicServer = oldStartPublicServer
+	})
+
+	wantErr := errors.New("manager initialization failed")
+	mainNewCertmagicManager = func(context.Context, autocert.Config) (certificateManager, error) {
+		return nil, wantErr
+	}
+	serverStartControlPlane = func(<-chan struct{}, func(string, string) (net.Listener, error)) error {
+		t.Fatal("control plane should not start after security initialization failure")
+		return nil
+	}
+	serverStartAdminServer = func(<-chan struct{}, func(string, http.Handler) error) <-chan error {
+		t.Fatal("admin server should not start after security initialization failure")
+		return nil
+	}
+	serverStartPublicServer = func(<-chan struct{}, func(string, http.Handler) error, func(string, string, string, http.Handler) error) <-chan error {
+		t.Fatal("public server should not start after security initialization failure")
+		return nil
+	}
+
+	var stdout bytes.Buffer
+	code := runMain(&stdout, func() (*config.ServerConfig, error) {
+		return &config.ServerConfig{
+			BaseDomain:  "tunnel.example.com",
+			TLSAuto:     true,
+			TLSEmail:    "admin@example.com",
+			TLSProvider: "cloudflare",
+			TLSAPIToken: "api-token",
+		}, nil
+	}, nil, nil, nil)
+
+	if code != 1 {
+		t.Fatalf("code = %d, want 1", code)
+	}
+	if !strings.Contains(stdout.String(), "failed to initialize control security") || !strings.Contains(stdout.String(), wantErr.Error()) {
+		t.Fatalf("stdout = %q, want security initialization error", stdout.String())
 	}
 }
 
@@ -808,7 +1276,7 @@ func TestStartPublicServerHTTPSRedirectError(t *testing.T) {
 
 func TestStartPublicServerAutoTLS(t *testing.T) {
 	oldCfg := cfg
-	oldServeCertmagic := mainServeCertmagic
+	oldManager := autoTLSManager
 	cfg = &config.ServerConfig{
 		BaseDomain:  "tunnel.example.com",
 		PublicPort:  443,
@@ -819,32 +1287,13 @@ func TestStartPublicServerAutoTLS(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		cfg = oldCfg
-		mainServeCertmagic = oldServeCertmagic
+		autoTLSManager = oldManager
 	})
 
 	stop := make(chan struct{})
 	called := make(chan struct{})
 
-	mainServeCertmagic = func(cmCfg autocert.Config, handler http.Handler) error {
-		if cmCfg.Email != "admin@example.com" {
-			t.Fatalf("email = %q, want %q", cmCfg.Email, "admin@example.com")
-		}
-		if cmCfg.Provider != "cloudflare" {
-			t.Fatalf("provider = %q, want %q", cmCfg.Provider, "cloudflare")
-		}
-		if cmCfg.APIToken != "test-token" {
-			t.Fatalf("api_token = %q, want %q", cmCfg.APIToken, "test-token")
-		}
-		if len(cmCfg.Domains) != 2 {
-			t.Fatalf("domains = %v, want 2 entries", cmCfg.Domains)
-		}
-		if cmCfg.Domains[0] != "tunnel.example.com" {
-			t.Fatalf("domains[0] = %q, want %q", cmCfg.Domains[0], "tunnel.example.com")
-		}
-		if cmCfg.Domains[1] != "*.tunnel.example.com" {
-			t.Fatalf("domains[1] = %q, want %q", cmCfg.Domains[1], "*.tunnel.example.com")
-		}
-
+	autoTLSManager = &fakeCertificateManager{serve: func(handler http.Handler) error {
 		// Verify handler is the HTTP proxy handler.
 		req := httptest.NewRequest(http.MethodGet, "/", nil)
 		req.Host = "localhost:443"
@@ -857,7 +1306,7 @@ func TestStartPublicServerAutoTLS(t *testing.T) {
 		close(called)
 		<-stop
 		return nil
-	}
+	}}
 
 	errs := startPublicServer(
 		stop,
@@ -885,7 +1334,7 @@ func TestStartPublicServerAutoTLS(t *testing.T) {
 
 func TestStartPublicServerAutoTLSReturnsError(t *testing.T) {
 	oldCfg := cfg
-	oldServeCertmagic := mainServeCertmagic
+	oldManager := autoTLSManager
 	cfg = &config.ServerConfig{
 		BaseDomain:  "tunnel.example.com",
 		PublicPort:  443,
@@ -896,13 +1345,13 @@ func TestStartPublicServerAutoTLSReturnsError(t *testing.T) {
 	}
 	t.Cleanup(func() {
 		cfg = oldCfg
-		mainServeCertmagic = oldServeCertmagic
+		autoTLSManager = oldManager
 	})
 
 	wantErr := errors.New("certmagic failed")
-	mainServeCertmagic = func(cmCfg autocert.Config, handler http.Handler) error {
+	autoTLSManager = &fakeCertificateManager{serve: func(http.Handler) error {
 		return wantErr
-	}
+	}}
 
 	errs := startPublicServer(
 		make(chan struct{}),
@@ -918,6 +1367,34 @@ func TestStartPublicServerAutoTLSReturnsError(t *testing.T) {
 
 	if err := <-errs; !errors.Is(err, wantErr) {
 		t.Fatalf("err = %v, want %v", err, wantErr)
+	}
+}
+
+func TestStartPublicServerAutoTLSRequiresInitializedManager(t *testing.T) {
+	oldCfg := cfg
+	oldManager := autoTLSManager
+	cfg = &config.ServerConfig{BaseDomain: "tunnel.example.com", PublicPort: 443, TLSAuto: true}
+	autoTLSManager = nil
+	t.Cleanup(func() {
+		cfg = oldCfg
+		autoTLSManager = oldManager
+	})
+
+	errs := startPublicServer(
+		make(chan struct{}),
+		func(string, http.Handler) error {
+			t.Fatal("serve should not be called")
+			return nil
+		},
+		func(string, string, string, http.Handler) error {
+			t.Fatal("serveTLS should not be called")
+			return nil
+		},
+	)
+
+	err := <-errs
+	if err == nil || err.Error() != "automatic TLS is not initialized" {
+		t.Fatalf("err = %v, want automatic TLS initialization error", err)
 	}
 }
 
@@ -1223,37 +1700,224 @@ func TestHTTPProxyUpgradeBidirectional(t *testing.T) {
 	}
 }
 
-func TestHandleConnectionRejectsMissingAndWrongToken(t *testing.T) {
+func TestSecureControlConnectionAuthenticatesBeforeYamux(t *testing.T) {
 	oldCfg := cfg
-	cfg = &config.ServerConfig{ControlToken: "control-secret"}
-	t.Cleanup(func() { cfg = oldCfg })
+	oldTLSConfig := controlTLSConfig
+	oldToken := controlToken
+	oldTimeout := serverHandshakeTimeout
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+		controlToken = oldToken
+		serverHandshakeTimeout = oldTimeout
+	})
 
-	for _, token := range []string{"", "wrong"} {
-		t.Run(token, func(t *testing.T) {
+	certificate, _, _ := generateTestCertificate(t)
+	leaf, err := x509.ParseCertificate(certificate.Certificate[0])
+	if err != nil {
+		t.Fatalf("ParseCertificate: %v", err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+
+	const expectedToken = "0123456789abcdef0123456789abcdef"
+	cfg = &config.ServerConfig{ControlTLSEnabled: true}
+	controlTLSConfig = &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12}
+	controlToken = expectedToken
+	serverHandshakeTimeout = time.Second
+
+	tests := []struct {
+		name    string
+		token   string
+		wantErr bool
+	}{
+		{name: "correct token", token: expectedToken},
+		{name: "wrong token", token: "fedcba9876543210fedcba9876543210", wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
 			clientConn, serverConn := net.Pipe()
-			defer clientConn.Close()
-			go handleConnection(serverConn)
+			t.Cleanup(func() {
+				clientConn.Close()
+				serverConn.Close()
+			})
 
-			session, err := tunnel.NewClientSession(clientConn)
-			if err != nil {
-				t.Fatalf("NewClientSession: %v", err)
+			type secureResult struct {
+				conn net.Conn
+				err  error
 			}
-			defer session.Close()
-			stream, err := session.Open()
-			if err != nil {
-				t.Fatalf("Open: %v", err)
+			serverResult := make(chan secureResult, 1)
+			applicationData := make(chan []byte, 1)
+			go func() {
+				secured, secureErr := secureControlConnection(serverConn)
+				serverResult <- secureResult{conn: secured, err: secureErr}
+				if secureErr != nil {
+					return
+				}
+				payload := make([]byte, len("yamux"))
+				if _, readErr := io.ReadFull(secured, payload); readErr == nil {
+					applicationData <- payload
+				}
+			}()
+
+			tlsClient := tls.Client(clientConn, &tls.Config{
+				MinVersion: tls.VersionTLS12,
+				RootCAs:    roots,
+				ServerName: "localhost",
+			})
+			clientErr := control.AuthenticateAsClient(tlsClient, tt.token, time.Second)
+			result := <-serverResult
+
+			if tt.wantErr {
+				if !errors.Is(clientErr, control.ErrAuthenticationFailed) {
+					t.Fatalf("client authentication error = %v, want %v", clientErr, control.ErrAuthenticationFailed)
+				}
+				if !errors.Is(result.err, control.ErrAuthenticationFailed) {
+					t.Fatalf("server authentication error = %v, want %v", result.err, control.ErrAuthenticationFailed)
+				}
+				if result.conn != nil {
+					t.Fatal("wrong token returned a connection that could be passed to yamux")
+				}
+				select {
+				case payload := <-applicationData:
+					t.Fatalf("application data %q reached the pre-yamux connection", payload)
+				default:
+				}
+				return
 			}
-			if err := protocol.WriteRequest(stream, &protocol.TunnelRequest{Protocol: protocol.ProtoHTTP, AuthToken: token}); err != nil {
-				t.Fatalf("WriteRequest: %v", err)
+
+			if clientErr != nil {
+				t.Fatalf("AuthenticateAsClient: %v", clientErr)
 			}
-			response, err := protocol.ReadResponse(stream)
-			if err != nil {
-				t.Fatalf("ReadResponse: %v", err)
+			if result.err != nil {
+				t.Fatalf("secureControlConnection: %v", result.err)
 			}
-			if response.Success || response.Error != "authentication failed" {
-				t.Fatalf("response = %+v, want generic authentication failure", response)
+			if result.conn == nil {
+				t.Fatal("successful authentication returned a nil connection")
+			}
+			if _, err := tlsClient.Write([]byte("yamux")); err != nil {
+				t.Fatalf("write post-authentication data: %v", err)
+			}
+			select {
+			case payload := <-applicationData:
+				if string(payload) != "yamux" {
+					t.Fatalf("application data = %q, want yamux", payload)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("authenticated connection did not carry post-authentication data")
 			}
 		})
+	}
+}
+
+func TestSecureControlConnectionPlaintext(t *testing.T) {
+	oldCfg := cfg
+	cfg = &config.ServerConfig{}
+	t.Cleanup(func() { cfg = oldCfg })
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		clientConn.Close()
+		serverConn.Close()
+	})
+
+	securedConn, err := secureControlConnection(serverConn)
+	if err != nil {
+		t.Fatalf("secureControlConnection: %v", err)
+	}
+	if securedConn != serverConn {
+		t.Fatal("plaintext control connection was replaced")
+	}
+}
+
+func TestSecureControlConnectionRejectsUninitializedTLS(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	cfg = &config.ServerConfig{ControlTLSEnabled: true}
+	controlTLSConfig = nil
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+	})
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		clientConn.Close()
+		serverConn.Close()
+	})
+
+	securedConn, err := secureControlConnection(serverConn)
+	if err == nil || err.Error() != "control TLS is not initialized" {
+		t.Fatalf("err = %v, want uninitialized TLS error", err)
+	}
+	if securedConn != nil {
+		t.Fatal("uninitialized TLS returned a secured connection")
+	}
+}
+
+func TestSecureControlConnectionDeadlineFailure(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	cfg = &config.ServerConfig{ControlTLSEnabled: true}
+	controlTLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+	})
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		clientConn.Close()
+		serverConn.Close()
+	})
+	wantErr := errors.New("deadline failed")
+
+	securedConn, err := secureControlConnection(deadlineErrorConn{Conn: serverConn, err: wantErr})
+	if !errors.Is(err, wantErr) || !strings.Contains(err.Error(), "setting TLS handshake deadline") {
+		t.Fatalf("err = %v, want wrapped deadline error", err)
+	}
+	if securedConn != nil {
+		t.Fatal("deadline failure returned a secured connection")
+	}
+}
+
+func TestSecureControlConnectionRejectsInvalidTLSHandshake(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	oldTimeout := serverHandshakeTimeout
+	certificate, _, _ := generateTestCertificate(t)
+	cfg = &config.ServerConfig{ControlTLSEnabled: true}
+	controlTLSConfig = &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12}
+	serverHandshakeTimeout = time.Second
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+		serverHandshakeTimeout = oldTimeout
+	})
+
+	clientConn, serverConn := net.Pipe()
+	t.Cleanup(func() {
+		clientConn.Close()
+		serverConn.Close()
+	})
+	result := make(chan error, 1)
+	go func() {
+		_, err := secureControlConnection(serverConn)
+		result <- err
+	}()
+
+	if _, err := io.WriteString(clientConn, "GET / HTTP/1.1\r\n\r\n"); err != nil {
+		t.Fatalf("write plaintext handshake: %v", err)
+	}
+	clientConn.Close()
+
+	select {
+	case err := <-result:
+		if err == nil || !strings.Contains(err.Error(), "TLS handshake failed") {
+			t.Fatalf("err = %v, want TLS handshake failure", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("invalid TLS handshake was not rejected")
 	}
 }
 
@@ -1277,21 +1941,254 @@ func TestHandleConnectionHandshakeTimeout(t *testing.T) {
 	}
 }
 
-func TestStartControlPlaneRejectsInvalidTLSKeyPair(t *testing.T) {
+func TestPrepareServerSecurityRejectsInvalidTLSKeyPair(t *testing.T) {
 	oldCfg := cfg
-	cfg = &config.ServerConfig{ControlTLSEnabled: true, ControlTLSCertFile: "missing-cert.pem", ControlTLSKeyFile: "missing-key.pem"}
-	t.Cleanup(func() { cfg = oldCfg })
-
-	called := false
-	err := startControlPlane(make(chan struct{}), func(string, string) (net.Listener, error) {
-		called = true
-		return nil, nil
+	oldTLSConfig := controlTLSConfig
+	oldToken := controlToken
+	oldManager := autoTLSManager
+	cfg = &config.ServerConfig{
+		ControlTLSEnabled:  true,
+		ControlTLSCertFile: "missing-cert.pem",
+		ControlTLSKeyFile:  "missing-key.pem",
+		ControlToken:       "0123456789abcdef0123456789abcdef",
+	}
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+		controlToken = oldToken
+		autoTLSManager = oldManager
 	})
+
+	err := prepareServerSecurity(context.Background())
 	if err == nil {
 		t.Fatal("expected invalid control TLS key pair error")
 	}
-	if called {
-		t.Fatal("listener opened before TLS key pair was validated")
+	if !strings.Contains(err.Error(), "loading control TLS key pair") {
+		t.Fatalf("error = %q, want key-pair context", err)
+	}
+}
+
+func TestPrepareServerSecurityClearsStateWhenControlTLSDisabled(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	oldToken := controlToken
+	oldManager := autoTLSManager
+	cfg = &config.ServerConfig{}
+	controlTLSConfig = &tls.Config{MinVersion: tls.VersionTLS13}
+	controlToken = "stale-token"
+	autoTLSManager = &fakeCertificateManager{}
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+		controlToken = oldToken
+		autoTLSManager = oldManager
+	})
+
+	if err := prepareServerSecurity(context.Background()); err != nil {
+		t.Fatalf("prepareServerSecurity: %v", err)
+	}
+	if controlTLSConfig != nil || controlToken != "" || autoTLSManager != nil {
+		t.Fatalf("security state was not reset: config=%v token=%q manager=%v", controlTLSConfig, controlToken, autoTLSManager)
+	}
+}
+
+func TestPrepareServerSecurityRejectsInvalidControlConfiguration(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	oldToken := controlToken
+	oldManager := autoTLSManager
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+		controlToken = oldToken
+		autoTLSManager = oldManager
+	})
+
+	tests := []struct {
+		name      string
+		config    *config.ServerConfig
+		wantError string
+	}{
+		{
+			name:      "missing token",
+			config:    &config.ServerConfig{ControlTLSEnabled: true},
+			wantError: "control token is required",
+		},
+		{
+			name: "missing certificate source",
+			config: &config.ServerConfig{
+				ControlTLSEnabled: true,
+				ControlToken:      "0123456789abcdef0123456789abcdef",
+			},
+			wantError: "control TLS certificate source is unavailable",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg = tt.config
+			err := prepareServerSecurity(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tt.wantError) {
+				t.Fatalf("err = %v, want %q", err, tt.wantError)
+			}
+		})
+	}
+}
+
+func TestPrepareServerSecurityPrefersDedicatedControlCertificate(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	oldToken := controlToken
+	oldManager := autoTLSManager
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+		controlToken = oldToken
+		autoTLSManager = oldManager
+	})
+
+	dedicatedCertificate, dedicatedCertFile, dedicatedKeyFile := generateTestCertificate(t)
+	_, publicCertFile, publicKeyFile := generateTestCertificate(t)
+	cfg = &config.ServerConfig{
+		ControlTLSEnabled:  true,
+		ControlTLSCertFile: dedicatedCertFile,
+		ControlTLSKeyFile:  dedicatedKeyFile,
+		ControlToken:       "0123456789abcdef0123456789abcdef",
+		TLSEnabled:         true,
+		TLSCertFile:        publicCertFile,
+		TLSKeyFile:         publicKeyFile,
+	}
+
+	if err := prepareServerSecurity(context.Background()); err != nil {
+		t.Fatalf("prepareServerSecurity: %v", err)
+	}
+	if controlTLSConfig == nil {
+		t.Fatal("control TLS config is nil")
+	}
+	if len(controlTLSConfig.Certificates) != 1 {
+		t.Fatalf("control TLS certificates = %d, want 1", len(controlTLSConfig.Certificates))
+	}
+	if !bytes.Equal(controlTLSConfig.Certificates[0].Certificate[0], dedicatedCertificate.Certificate[0]) {
+		t.Fatal("control TLS did not prefer its dedicated certificate")
+	}
+	if controlTLSConfig.MinVersion != tls.VersionTLS12 {
+		t.Fatalf("minimum TLS version = %d, want TLS 1.2", controlTLSConfig.MinVersion)
+	}
+}
+
+func TestPrepareServerSecurityReusesPublicManualCertificate(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	oldToken := controlToken
+	oldManager := autoTLSManager
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+		controlToken = oldToken
+		autoTLSManager = oldManager
+	})
+
+	publicCertificate, publicCertFile, publicKeyFile := generateTestCertificate(t)
+	cfg = &config.ServerConfig{
+		ControlTLSEnabled: true,
+		ControlToken:      "0123456789abcdef0123456789abcdef",
+		TLSEnabled:        true,
+		TLSCertFile:       publicCertFile,
+		TLSKeyFile:        publicKeyFile,
+	}
+
+	if err := prepareServerSecurity(context.Background()); err != nil {
+		t.Fatalf("prepareServerSecurity: %v", err)
+	}
+	if controlTLSConfig == nil {
+		t.Fatal("control TLS config is nil")
+	}
+	if len(controlTLSConfig.Certificates) != 1 {
+		t.Fatalf("control TLS certificates = %d, want 1", len(controlTLSConfig.Certificates))
+	}
+	if !bytes.Equal(controlTLSConfig.Certificates[0].Certificate[0], publicCertificate.Certificate[0]) {
+		t.Fatal("control TLS did not reuse the public manual certificate")
+	}
+}
+
+func TestPrepareServerSecurityReusesAutomaticManager(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	oldToken := controlToken
+	oldManager := autoTLSManager
+	oldNewManager := mainNewCertmagicManager
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+		controlToken = oldToken
+		autoTLSManager = oldManager
+		mainNewCertmagicManager = oldNewManager
+	})
+
+	managerTLSConfig := &tls.Config{MinVersion: tls.VersionTLS13}
+	manager := &fakeCertificateManager{tlsConfig: managerTLSConfig}
+	var gotConfig autocert.Config
+	mainNewCertmagicManager = func(_ context.Context, managerConfig autocert.Config) (certificateManager, error) {
+		gotConfig = managerConfig
+		return manager, nil
+	}
+	cfg = &config.ServerConfig{
+		BaseDomain:        "tunnel.example.com",
+		ControlTLSEnabled: true,
+		ControlToken:      "0123456789abcdef0123456789abcdef",
+		TLSAuto:           true,
+		TLSEmail:          "admin@example.com",
+		TLSProvider:       "cloudflare",
+		TLSAPIToken:       "api-token",
+	}
+
+	if err := prepareServerSecurity(context.Background()); err != nil {
+		t.Fatalf("prepareServerSecurity: %v", err)
+	}
+	if gotConfig.Email != cfg.TLSEmail || gotConfig.Provider != cfg.TLSProvider || gotConfig.APIToken != cfg.TLSAPIToken {
+		t.Fatalf("manager config = %+v, want values from server config", gotConfig)
+	}
+	wantDomains := []string{"tunnel.example.com", "*.tunnel.example.com"}
+	if len(gotConfig.Domains) != len(wantDomains) || gotConfig.Domains[0] != wantDomains[0] || gotConfig.Domains[1] != wantDomains[1] {
+		t.Fatalf("manager domains = %v, want %v", gotConfig.Domains, wantDomains)
+	}
+	if autoTLSManager != manager {
+		t.Fatal("automatic TLS manager was not retained for public serving")
+	}
+	if controlTLSConfig != managerTLSConfig {
+		t.Fatal("control TLS did not reuse the automatic manager TLS configuration")
+	}
+}
+
+func TestPrepareServerSecurityLoadsTokenFile(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	oldToken := controlToken
+	oldManager := autoTLSManager
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+		controlToken = oldToken
+		autoTLSManager = oldManager
+	})
+
+	_, certFile, keyFile := generateTestCertificate(t)
+	const wantToken = "0123456789abcdef0123456789abcdef"
+	tokenFile := filepath.Join(t.TempDir(), "control-token")
+	if err := os.WriteFile(tokenFile, []byte("  \n"+wantToken+"\n  "), 0o600); err != nil {
+		t.Fatalf("WriteFile token: %v", err)
+	}
+	cfg = &config.ServerConfig{
+		ControlTLSEnabled:  true,
+		ControlTLSCertFile: certFile,
+		ControlTLSKeyFile:  keyFile,
+		ControlTokenFile:   tokenFile,
+	}
+
+	if err := prepareServerSecurity(context.Background()); err != nil {
+		t.Fatalf("prepareServerSecurity: %v", err)
+	}
+	if controlToken != wantToken {
+		t.Fatalf("control token = %q, want trimmed token", controlToken)
 	}
 }
 
@@ -2067,6 +2964,51 @@ func TestCheckBasicAuthNoAuthRequired(t *testing.T) {
 	}
 	if w.Code != http.StatusOK {
 		t.Errorf("status = %d, want 200", w.Code)
+	}
+}
+
+func TestConstantTimeEqual(t *testing.T) {
+	tests := []struct {
+		name     string
+		actual   string
+		expected string
+		want     bool
+	}{
+		{name: "equal", actual: "admin:secret", expected: "admin:secret", want: true},
+		{name: "different value", actual: "admin:wrong!", expected: "admin:secret"},
+		{name: "different length", actual: "short", expected: "admin:secret"},
+		{name: "empty", actual: "", expected: "", want: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := constantTimeEqual(tt.actual, tt.expected); got != tt.want {
+				t.Fatalf("constantTimeEqual() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestNormalizeCredentialMatchesExpectedLength(t *testing.T) {
+	tests := []struct {
+		name       string
+		credential string
+		length     int
+		want       []byte
+	}{
+		{name: "shorter", credential: "abc", length: 5, want: []byte{'a', 'b', 'c', 0, 0}},
+		{name: "equal", credential: "abc", length: 3, want: []byte("abc")},
+		{name: "longer", credential: "abcdef", length: 3, want: []byte("abc")},
+		{name: "empty", credential: "abc", length: 0, want: []byte{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := normalizeCredential(tt.credential, tt.length)
+			if !bytes.Equal(got, tt.want) {
+				t.Fatalf("normalizeCredential() = %v, want %v", got, tt.want)
+			}
+		})
 	}
 }
 
@@ -3033,4 +3975,287 @@ func TestRunMainStartupUpdateCheck(t *testing.T) {
 	// Unblock runMain so the goroutine completes before cleanup.
 	adminErrs <- nil
 	<-done
+}
+
+func TestRunMainReturnsZeroOnShutdownSignal(t *testing.T) {
+	oldCfg := cfg
+	oldCheckUpdate := serverCheckUpdate
+	oldStartControlPlane := serverStartControlPlane
+	oldStartAdminServer := serverStartAdminServer
+	oldStartPublicServer := serverStartPublicServer
+	t.Cleanup(func() {
+		cfg = oldCfg
+		serverCheckUpdate = oldCheckUpdate
+		serverStartControlPlane = oldStartControlPlane
+		serverStartAdminServer = oldStartAdminServer
+		serverStartPublicServer = oldStartPublicServer
+	})
+
+	serverCheckUpdate = noopCheckUpdate
+	started := make(chan struct{}, 3)
+	stopped := make(chan struct{})
+	serverStartControlPlane = func(stop <-chan struct{}, _ func(string, string) (net.Listener, error)) error {
+		started <- struct{}{}
+		go func() {
+			<-stop
+			close(stopped)
+		}()
+		return nil
+	}
+	serverStartAdminServer = func(<-chan struct{}, func(string, http.Handler) error) <-chan error {
+		started <- struct{}{}
+		return make(chan error)
+	}
+	serverStartPublicServer = func(<-chan struct{}, func(string, http.Handler) error, func(string, string, string, http.Handler) error) <-chan error {
+		started <- struct{}{}
+		return make(chan error)
+	}
+
+	type result struct {
+		code int
+		log  string
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		var output bytes.Buffer
+		code := runMain(&output, func() (*config.ServerConfig, error) {
+			return &config.ServerConfig{
+				BaseDomain:     "localhost",
+				PublicPort:     8080,
+				AdminPort:      8081,
+				ControlPort:    7000,
+				PortRangeStart: 34000,
+				PortRangeEnd:   34010,
+			}, nil
+		}, nil, nil, nil)
+		resultCh <- result{code: code, log: output.String()}
+	}()
+
+	for range 3 {
+		select {
+		case <-started:
+		case <-time.After(5 * time.Second):
+			t.Fatal("runMain did not start all server components")
+		}
+	}
+	process, err := os.FindProcess(os.Getpid())
+	if err != nil {
+		t.Fatalf("FindProcess: %v", err)
+	}
+	if err := process.Signal(os.Interrupt); err != nil {
+		t.Fatalf("signal process: %v", err)
+	}
+
+	select {
+	case got := <-resultCh:
+		if got.code != 0 {
+			t.Fatalf("code = %d, want 0", got.code)
+		}
+		if !strings.Contains(got.log, "shutdown signal received") {
+			t.Fatalf("log = %q, want shutdown signal message", got.log)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("runMain did not return after interrupt")
+	}
+	waitForTestEvent(t, stopped, "runMain did not close the control-plane stop channel")
+}
+
+func TestDefaultAutomaticTLSManagerRejectsUnsupportedProvider(t *testing.T) {
+	_, err := mainNewCertmagicManager(context.Background(), autocert.Config{
+		Provider: "unsupported",
+		Domains:  []string{"tunnel.example.com", "*.tunnel.example.com"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "unsupported DNS provider") {
+		t.Fatalf("err = %v, want unsupported provider error", err)
+	}
+}
+
+func TestStartControlPlaneCapsAcceptBackoffAndStopsRetry(t *testing.T) {
+	oldCfg := cfg
+	oldLogger := slog.Default()
+	cfg = &config.ServerConfig{ControlPort: 7000}
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() {
+		cfg = oldCfg
+		slog.SetDefault(oldLogger)
+	})
+
+	listener := &repeatedErrorListener{
+		closed:     make(chan struct{}),
+		notifyCall: 9,
+		notify:     make(chan struct{}),
+	}
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	stopServer := func() { stopOnce.Do(func() { close(stop) }) }
+	t.Cleanup(func() {
+		stopServer()
+		listener.Close()
+	})
+
+	if err := startControlPlane(stop, func(string, string) (net.Listener, error) {
+		return listener, nil
+	}); err != nil {
+		t.Fatalf("startControlPlane: %v", err)
+	}
+	waitForTestEvent(t, listener.notify, "accept loop did not reach the capped backoff")
+	stopServer()
+	waitForTestEvent(t, listener.closed, "control listener was not closed during backoff")
+}
+
+func TestStartControlPlaneRejectsHandshakeAndConnectionOverflow(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	cfg = &config.ServerConfig{ControlPort: 7000, ControlTLSEnabled: true}
+	controlTLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+	})
+
+	listener := newControlTestListener()
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	stopServer := func() { stopOnce.Do(func() { close(stop) }) }
+	remoteRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRemotes := func() { releaseOnce.Do(func() { close(remoteRelease) }) }
+	allConnections := make([]*controlTestConn, 0, maxControlConnections+1)
+	t.Cleanup(func() {
+		releaseRemotes()
+		stopServer()
+		listener.Close()
+		for _, conn := range allConnections {
+			conn.Close()
+		}
+	})
+
+	if err := startControlPlane(stop, func(string, string) (net.Listener, error) {
+		return listener, nil
+	}); err != nil {
+		t.Fatalf("startControlPlane: %v", err)
+	}
+
+	for range maxPendingControlHandshakes {
+		conn := newControlTestConn(nil)
+		allConnections = append(allConnections, conn)
+		listener.connections <- conn
+		waitForTestEvent(t, conn.readCalled, "connection did not occupy a handshake slot")
+	}
+
+	handshakeRejected := make([]*controlTestConn, 0, maxControlConnections-maxPendingControlHandshakes)
+	for range maxControlConnections - maxPendingControlHandshakes {
+		conn := newControlTestConn(remoteRelease)
+		allConnections = append(allConnections, conn)
+		handshakeRejected = append(handshakeRejected, conn)
+		listener.connections <- conn
+		waitForTestEvent(t, conn.remoteCalled, "handshake overflow was not rejected")
+	}
+
+	connectionRejected := newControlTestConn(nil)
+	allConnections = append(allConnections, connectionRejected)
+	listener.connections <- connectionRejected
+	waitForTestEvent(t, connectionRejected.remoteCalled, "connection overflow was not rejected")
+	waitForTestEvent(t, connectionRejected.closed, "connection overflow was not closed")
+
+	releaseRemotes()
+	for _, conn := range handshakeRejected {
+		waitForTestEvent(t, conn.closed, "handshake overflow connection was not closed")
+	}
+	stopServer()
+	waitForTestEvent(t, listener.closed, "control listener was not closed")
+}
+
+func TestStartControlPlaneStopsConnectionBeforeHandshakeAdmission(t *testing.T) {
+	oldCfg := cfg
+	oldTLSConfig := controlTLSConfig
+	cfg = &config.ServerConfig{ControlPort: 7000, ControlTLSEnabled: true}
+	controlTLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	t.Cleanup(func() {
+		cfg = oldCfg
+		controlTLSConfig = oldTLSConfig
+	})
+
+	initial := make([]net.Conn, 0, maxPendingControlHandshakes)
+	blockers := make([]*controlTestConn, 0, maxPendingControlHandshakes)
+	for range maxPendingControlHandshakes {
+		conn := newControlTestConn(nil)
+		initial = append(initial, conn)
+		blockers = append(blockers, conn)
+	}
+	final := newControlTestConn(nil)
+	listener := &closeAcceptListener{
+		initial: initial,
+		final:   final,
+		closed:  make(chan struct{}),
+	}
+	stop := make(chan struct{})
+	var stopOnce sync.Once
+	stopServer := func() { stopOnce.Do(func() { close(stop) }) }
+	t.Cleanup(func() {
+		stopServer()
+		listener.Close()
+		final.Close()
+		for _, conn := range blockers {
+			conn.Close()
+		}
+	})
+
+	if err := startControlPlane(stop, func(string, string) (net.Listener, error) {
+		return listener, nil
+	}); err != nil {
+		t.Fatalf("startControlPlane: %v", err)
+	}
+	for _, conn := range blockers {
+		waitForTestEvent(t, conn.readCalled, "connection did not occupy a handshake slot")
+	}
+
+	stopServer()
+	waitForTestEvent(t, final.closed, "connection accepted during shutdown was not closed")
+	for _, conn := range blockers {
+		waitForTestEvent(t, conn.closed, "active handshake was not closed during shutdown")
+	}
+}
+
+func TestHandleConnectionLogsDeadlineClearFailure(t *testing.T) {
+	clientConn, serverConn := net.Pipe()
+	wantErr := errors.New("clear deadline failed")
+	sequencedConn := &deadlineSequenceConn{Conn: serverConn, failAt: 2, failErr: wantErr}
+	t.Cleanup(func() {
+		clientConn.Close()
+		serverConn.Close()
+	})
+
+	done := make(chan struct{})
+	go func() {
+		handleConnection(sequencedConn)
+		close(done)
+	}()
+	clientSession, err := tunnel.NewClientSession(clientConn)
+	if err != nil {
+		t.Fatalf("NewClientSession: %v", err)
+	}
+	controlStream, err := clientSession.Open()
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := protocol.WriteRequest(controlStream, &protocol.TunnelRequest{Protocol: "unsupported"}); err != nil {
+		t.Fatalf("WriteRequest: %v", err)
+	}
+	response, err := protocol.ReadResponse(controlStream)
+	if err != nil {
+		t.Fatalf("ReadResponse: %v", err)
+	}
+	if response.Success || response.Error != "unsupported protocol" {
+		t.Fatalf("response = %+v, want unsupported protocol failure", response)
+	}
+	clientSession.Close()
+	waitForTestEvent(t, done, "handleConnection did not return")
+
+	sequencedConn.mu.Lock()
+	calls := sequencedConn.calls
+	sequencedConn.mu.Unlock()
+	if calls != 2 {
+		t.Fatalf("SetDeadline calls = %d, want 2", calls)
+	}
 }

@@ -18,10 +18,16 @@ import (
 	"testing"
 	"time"
 
+	"ratatosk/internal/control"
 	"ratatosk/internal/inspector"
 	"ratatosk/internal/protocol"
 	"ratatosk/internal/redact"
 	"ratatosk/internal/tunnel"
+)
+
+const (
+	testControlToken      = "0123456789abcdef0123456789abcdef"
+	testOtherControlToken = "abcdef0123456789abcdef0123456789"
 )
 
 var noopRawClient = func(string, int, string) error { return nil }
@@ -41,6 +47,46 @@ func startMockRelay(t *testing.T, handler func(net.Conn)) string {
 		handler(conn)
 	}()
 	return ln.Addr().String()
+}
+
+func startMockTLSRelay(t *testing.T, expectedToken string, handler func(net.Conn)) (string, string, <-chan error) {
+	t.Helper()
+
+	certificateServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	certificate := certificateServer.TLS.Certificates[0]
+	leaf := certificateServer.Certificate()
+	certificateServer.Close()
+
+	caFile := t.TempDir() + "/ca.pem"
+	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	tlsListener := tls.NewListener(listener, &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12})
+	t.Cleanup(func() { tlsListener.Close() })
+
+	authResult := make(chan error, 1)
+	go func() {
+		conn, err := tlsListener.Accept()
+		if err != nil {
+			authResult <- err
+			return
+		}
+		defer conn.Close()
+
+		err = control.AuthenticateAsServer(conn, expectedToken, time.Second)
+		authResult <- err
+		if err != nil || handler == nil {
+			return
+		}
+		handler(conn)
+	}()
+
+	return tlsListener.Addr().String(), caFile, authResult
 }
 
 func TestRunVersionCommand(t *testing.T) {
@@ -285,9 +331,11 @@ func TestRunSelfUpdateCommand(t *testing.T) {
 func TestRunUsesEnvOverride(t *testing.T) {
 	oldLogger := slog.Default()
 	oldRedact := redact.Enabled
+	oldOptions := cliControlOptions
 	t.Cleanup(func() {
 		slog.SetDefault(oldLogger)
 		redact.Enabled = oldRedact
+		cliControlOptions = oldOptions
 	})
 
 	var stdout bytes.Buffer
@@ -300,8 +348,11 @@ func TestRunUsesEnvOverride(t *testing.T) {
 	code := run(
 		[]string{"ratatosk", "-port", "4567", "-basic-auth", "admin:secret"},
 		func(key string) string {
-			if key == "RATATOSK_SERVER" {
+			switch key {
+			case "RATATOSK_SERVER":
 				return "relay.example:7000"
+			case "RATATOSK_CONTROL_TOKEN":
+				return testControlToken
 			}
 			return ""
 		},
@@ -337,9 +388,11 @@ func TestRunUsesEnvOverride(t *testing.T) {
 func TestRunExplicitServerBeatsEnvOverride(t *testing.T) {
 	oldLogger := slog.Default()
 	oldRedact := redact.Enabled
+	oldOptions := cliControlOptions
 	t.Cleanup(func() {
 		slog.SetDefault(oldLogger)
 		redact.Enabled = oldRedact
+		cliControlOptions = oldOptions
 	})
 
 	var stdout bytes.Buffer
@@ -349,8 +402,11 @@ func TestRunExplicitServerBeatsEnvOverride(t *testing.T) {
 	code := run(
 		[]string{"ratatosk", "-server", "manual.example:1234"},
 		func(key string) string {
-			if key == "RATATOSK_SERVER" {
+			switch key {
+			case "RATATOSK_SERVER":
 				return "relay.example:7000"
+			case "RATATOSK_CONTROL_TOKEN":
+				return testControlToken
 			}
 			return ""
 		},
@@ -400,51 +456,31 @@ func TestBuildControlTLSConfig(t *testing.T) {
 }
 
 func TestConnectAndHandshakeWithVerifiedTLSAndToken(t *testing.T) {
-	certificateServer := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	certificate := certificateServer.TLS.Certificates[0]
-	leaf := certificateServer.Certificate()
-	certificateServer.Close()
-
-	caFile := t.TempDir() + "/ca.pem"
-	if err := os.WriteFile(caFile, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: leaf.Raw}), 0o600); err != nil {
-		t.Fatalf("WriteFile: %v", err)
-	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("Listen: %v", err)
-	}
-	tlsListener := tls.NewListener(listener, &tls.Config{Certificates: []tls.Certificate{certificate}, MinVersion: tls.VersionTLS12})
-	t.Cleanup(func() { tlsListener.Close() })
 	requestReceived := make(chan *protocol.TunnelRequest, 1)
-	go func() {
-		conn, acceptErr := tlsListener.Accept()
-		if acceptErr != nil {
-			return
-		}
-		defer conn.Close()
-		session, sessionErr := tunnel.NewServerSession(conn)
-		if sessionErr != nil {
+	address, caFile, authResult := startMockTLSRelay(t, testControlToken, func(conn net.Conn) {
+		session, err := tunnel.NewServerSession(conn)
+		if err != nil {
 			return
 		}
 		defer session.Close()
-		stream, streamErr := session.Accept()
-		if streamErr != nil {
+		stream, err := session.Accept()
+		if err != nil {
 			return
 		}
-		request, readErr := protocol.ReadRequest(stream)
-		if readErr != nil {
+		request, err := protocol.ReadRequest(stream)
+		if err != nil {
 			return
 		}
 		requestReceived <- request
 		_ = protocol.WriteResponse(stream, &protocol.TunnelResponse{Success: true, Subdomain: "secure"})
 		stream.Close()
 		_, _ = session.Accept()
-	}()
+	})
 
 	oldOptions := cliControlOptions
-	cliControlOptions = controlOptions{TLS: true, CAFile: caFile, ServerName: "127.0.0.1", AuthToken: "control-secret"}
+	cliControlOptions = controlOptions{Token: testControlToken, TLS: true, CAFile: caFile, ServerName: "127.0.0.1"}
 	t.Cleanup(func() { cliControlOptions = oldOptions })
-	conn, session, _, err := connectAndHandshake(tlsListener.Addr().String(), &protocol.TunnelRequest{Protocol: protocol.ProtoHTTP, AuthToken: cliControlOptions.AuthToken})
+	conn, session, _, err := connectAndHandshake(address, &protocol.TunnelRequest{Protocol: protocol.ProtoHTTP})
 	if err != nil {
 		t.Fatalf("connectAndHandshake: %v", err)
 	}
@@ -453,11 +489,30 @@ func TestConnectAndHandshakeWithVerifiedTLSAndToken(t *testing.T) {
 
 	select {
 	case request := <-requestReceived:
-		if request.AuthToken != "control-secret" {
-			t.Fatalf("AuthToken = %q", request.AuthToken)
+		if request.Protocol != protocol.ProtoHTTP {
+			t.Fatalf("Protocol = %q, want %q", request.Protocol, protocol.ProtoHTTP)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("TLS relay did not receive tunnel request")
+	}
+	if err := <-authResult; err != nil {
+		t.Fatalf("AuthenticateAsServer: %v", err)
+	}
+}
+
+func TestConnectAndHandshakeRejectsWrongTLSControlToken(t *testing.T) {
+	address, caFile, authResult := startMockTLSRelay(t, testControlToken, nil)
+
+	oldOptions := cliControlOptions
+	cliControlOptions = controlOptions{Token: testOtherControlToken, TLS: true, CAFile: caFile, ServerName: "127.0.0.1"}
+	t.Cleanup(func() { cliControlOptions = oldOptions })
+
+	_, _, _, err := connectAndHandshake(address, &protocol.TunnelRequest{Protocol: protocol.ProtoHTTP})
+	if !errors.Is(err, control.ErrAuthenticationFailed) {
+		t.Fatalf("connectAndHandshake error = %v, want authentication failure", err)
+	}
+	if serverErr := <-authResult; !errors.Is(serverErr, control.ErrAuthenticationFailed) {
+		t.Fatalf("AuthenticateAsServer error = %v, want authentication failure", serverErr)
 	}
 }
 
@@ -475,6 +530,65 @@ func TestConnectAndHandshakeTimesOut(t *testing.T) {
 	}
 }
 
+func TestConnectAndHandshakeTimesOutAfterTLSAuthentication(t *testing.T) {
+	address, caFile, authResult := startMockTLSRelay(t, testControlToken, func(net.Conn) {
+		time.Sleep(500 * time.Millisecond)
+	})
+
+	oldOptions := cliControlOptions
+	oldTimeout := cliHandshakeTimeout
+	cliControlOptions = controlOptions{Token: testControlToken, TLS: true, CAFile: caFile, ServerName: "127.0.0.1"}
+	cliHandshakeTimeout = 30 * time.Millisecond
+	t.Cleanup(func() {
+		cliControlOptions = oldOptions
+		cliHandshakeTimeout = oldTimeout
+	})
+
+	started := time.Now()
+	_, _, _, err := connectAndHandshake(address, &protocol.TunnelRequest{Protocol: protocol.ProtoHTTP})
+	if err == nil {
+		t.Fatal("connectAndHandshake succeeded when the relay stalled after authentication")
+	}
+	if elapsed := time.Since(started); elapsed >= 250*time.Millisecond {
+		t.Fatalf("connectAndHandshake returned after %v, want handshake timeout before relay close", elapsed)
+	}
+	if authErr := <-authResult; authErr != nil {
+		t.Fatalf("AuthenticateAsServer: %v", authErr)
+	}
+}
+
+func TestConnectAndHandshakeClosesWhenRestoringDeadlineFails(t *testing.T) {
+	address, caFile, authResult := startMockTLSRelay(t, testControlToken, nil)
+
+	oldOptions := cliControlOptions
+	oldSetDeadline := cliSetDeadline
+	cliControlOptions = controlOptions{Token: testControlToken, TLS: true, CAFile: caFile, ServerName: "127.0.0.1"}
+	calls := 0
+	wantErr := errors.New("deadline unavailable")
+	cliSetDeadline = func(conn net.Conn, deadline time.Time) error {
+		calls++
+		if calls == 2 {
+			return wantErr
+		}
+		return conn.SetDeadline(deadline)
+	}
+	t.Cleanup(func() {
+		cliControlOptions = oldOptions
+		cliSetDeadline = oldSetDeadline
+	})
+
+	_, _, _, err := connectAndHandshake(address, &protocol.TunnelRequest{Protocol: protocol.ProtoHTTP})
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("connectAndHandshake error = %v, want %v", err, wantErr)
+	}
+	if !strings.Contains(err.Error(), "restoring handshake deadline") {
+		t.Fatalf("connectAndHandshake error = %q, want deadline context", err)
+	}
+	if authErr := <-authResult; authErr != nil {
+		t.Fatalf("AuthenticateAsServer: %v", authErr)
+	}
+}
+
 func TestRunHTTPControlSecurityFlagsAndEnv(t *testing.T) {
 	oldOptions := cliControlOptions
 	t.Cleanup(func() { cliControlOptions = oldOptions })
@@ -482,8 +596,8 @@ func TestRunHTTPControlSecurityFlagsAndEnv(t *testing.T) {
 	code := runHTTPCommand(
 		[]string{"ratatosk", "--tls", "--ca", "/tmp/ca.pem", "--server-name", "relay.example"},
 		func(key string) string {
-			if key == "RATATOSK_AUTH_TOKEN" {
-				return "control-secret"
+			if key == "RATATOSK_CONTROL_TOKEN" {
+				return testControlToken
 			}
 			return ""
 		},
@@ -494,14 +608,320 @@ func TestRunHTTPControlSecurityFlagsAndEnv(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("code = %d, want 0", code)
 	}
-	if !cliControlOptions.TLS || cliControlOptions.CAFile != "/tmp/ca.pem" || cliControlOptions.ServerName != "relay.example" || cliControlOptions.AuthToken != "control-secret" {
+	if !cliControlOptions.TLS || cliControlOptions.CAFile != "/tmp/ca.pem" || cliControlOptions.ServerName != "relay.example" || cliControlOptions.Token != testControlToken {
 		t.Fatalf("control options = %+v", cliControlOptions)
+	}
+}
+
+func TestRunControlTLSFromEnvironment(t *testing.T) {
+	tests := []struct {
+		name   string
+		tlsEnv string
+	}{
+		{name: "current variable", tlsEnv: "RATATOSK_CONTROL_TLS"},
+		{name: "legacy variable", tlsEnv: "RATATOSK_CONTROL_TLS_ENABLED"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldLogger := slog.Default()
+			oldRedact := redact.Enabled
+			oldOptions := cliControlOptions
+			t.Cleanup(func() {
+				slog.SetDefault(oldLogger)
+				redact.Enabled = oldRedact
+				cliControlOptions = oldOptions
+			})
+
+			called := false
+			code := runHTTPCommand(
+				[]string{"ratatosk"},
+				func(key string) string {
+					switch key {
+					case tt.tlsEnv:
+						return "true"
+					case "RATATOSK_CONTROL_TOKEN":
+						return testControlToken
+					default:
+						return ""
+					}
+				},
+				io.Discard,
+				io.Discard,
+				func(string, int, string) error {
+					called = true
+					return nil
+				},
+			)
+			if code != 0 || !called {
+				t.Fatalf("code = %d, client called = %v, want successful client call", code, called)
+			}
+			if !cliControlOptions.TLS || cliControlOptions.Token != testControlToken {
+				t.Fatalf("control options = %+v", cliControlOptions)
+			}
+		})
+	}
+}
+
+func TestRunRejectsInvalidControlTLSEnvironment(t *testing.T) {
+	tests := []struct {
+		name   string
+		tlsEnv string
+		run    func(func(string) string, *bytes.Buffer, *bool) int
+	}{
+		{
+			name:   "http current variable",
+			tlsEnv: "RATATOSK_CONTROL_TLS",
+			run: func(getenv func(string) string, stderr *bytes.Buffer, called *bool) int {
+				return runHTTPCommand(
+					[]string{"ratatosk"},
+					getenv,
+					io.Discard,
+					stderr,
+					func(string, int, string) error {
+						*called = true
+						return nil
+					},
+				)
+			},
+		},
+		{
+			name:   "tcp legacy variable",
+			tlsEnv: "RATATOSK_CONTROL_TLS_ENABLED",
+			run: func(getenv func(string) string, stderr *bytes.Buffer, called *bool) int {
+				return runTCPCommand(
+					[]string{"22"},
+					getenv,
+					io.Discard,
+					stderr,
+					func(string, int, string) error {
+						*called = true
+						return nil
+					},
+				)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			called := false
+			getenv := func(key string) string {
+				if key == tt.tlsEnv {
+					return "definitely-not-a-boolean"
+				}
+				return ""
+			}
+
+			if code := tt.run(getenv, &stderr, &called); code != 1 || called {
+				t.Fatalf("code = %d, client called = %v, want code 1 without client", code, called)
+			}
+			if !strings.Contains(stderr.String(), "control TLS environment value must be a boolean") {
+				t.Fatalf("stderr = %q, want boolean validation error", stderr.String())
+			}
+		})
+	}
+}
+
+func TestRunHTTPControlTokenFile(t *testing.T) {
+	oldOptions := cliControlOptions
+	t.Cleanup(func() { cliControlOptions = oldOptions })
+
+	tokenFile := t.TempDir() + "/token"
+	if err := os.WriteFile(tokenFile, []byte("\n"+testControlToken+"\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	code := runHTTPCommand(
+		[]string{"ratatosk", "--tls"},
+		func(key string) string {
+			if key == "RATATOSK_CONTROL_TOKEN_FILE" {
+				return tokenFile
+			}
+			return ""
+		},
+		io.Discard,
+		io.Discard,
+		func(string, int, string) error { return nil },
+	)
+	if code != 0 {
+		t.Fatalf("code = %d, want 0", code)
+	}
+	if cliControlOptions.Token != testControlToken || !cliControlOptions.TLS {
+		t.Fatalf("control options = %+v", cliControlOptions)
+	}
+}
+
+func TestRunHTTPRejectsBothControlTokenSources(t *testing.T) {
+	tokenFile := t.TempDir() + "/token"
+	if err := os.WriteFile(tokenFile, []byte(testOtherControlToken), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	var stderr bytes.Buffer
+	called := false
+	code := runHTTPCommand(
+		[]string{"ratatosk", "--tls"},
+		func(key string) string {
+			switch key {
+			case "RATATOSK_CONTROL_TOKEN":
+				return testControlToken
+			case "RATATOSK_CONTROL_TOKEN_FILE":
+				return tokenFile
+			default:
+				return ""
+			}
+		},
+		io.Discard,
+		&stderr,
+		func(string, int, string) error {
+			called = true
+			return nil
+		},
+	)
+	if code != 1 || called {
+		t.Fatalf("code = %d, client called = %v, want code 1 without client", code, called)
+	}
+	if !strings.Contains(stderr.String(), "control token sources are mutually exclusive") {
+		t.Fatalf("stderr = %q, want mutually exclusive token error", stderr.String())
+	}
+}
+
+func TestRunHTTPRejectsControlTokenOnPlaintextLoopback(t *testing.T) {
+	var stderr bytes.Buffer
+	called := false
+	code := runHTTPCommand(
+		[]string{"ratatosk", "--server", "127.0.0.1:7000"},
+		func(key string) string {
+			if key == "RATATOSK_CONTROL_TOKEN" {
+				return testControlToken
+			}
+			return ""
+		},
+		io.Discard,
+		&stderr,
+		func(string, int, string) error {
+			called = true
+			return nil
+		},
+	)
+	if code != 1 || called {
+		t.Fatalf("code = %d, client called = %v, want code 1 without client", code, called)
+	}
+	if !strings.Contains(stderr.String(), "control tokens require TLS") {
+		t.Fatalf("stderr = %q, want TLS requirement", stderr.String())
+	}
+}
+
+func TestRunHTTPRemoteAddressRequiresTLSAndToken(t *testing.T) {
+	t.Run("token enables implied TLS", func(t *testing.T) {
+		oldOptions := cliControlOptions
+		t.Cleanup(func() { cliControlOptions = oldOptions })
+
+		called := false
+		code := runHTTPCommand(
+			[]string{"ratatosk", "--server", "relay.example:7000"},
+			func(key string) string {
+				if key == "RATATOSK_CONTROL_TOKEN" {
+					return testControlToken
+				}
+				return ""
+			},
+			io.Discard,
+			io.Discard,
+			func(string, int, string) error {
+				called = true
+				return nil
+			},
+		)
+		if code != 0 || !called {
+			t.Fatalf("code = %d, client called = %v, want successful client call", code, called)
+		}
+		if !cliControlOptions.TLS || cliControlOptions.Token != testControlToken {
+			t.Fatalf("control options = %+v", cliControlOptions)
+		}
+	})
+
+	t.Run("missing token is rejected", func(t *testing.T) {
+		var stderr bytes.Buffer
+		called := false
+		code := runHTTPCommand(
+			[]string{"ratatosk", "--server", "relay.example:7000"},
+			func(string) string { return "" },
+			io.Discard,
+			&stderr,
+			func(string, int, string) error {
+				called = true
+				return nil
+			},
+		)
+		if code != 1 || called {
+			t.Fatalf("code = %d, client called = %v, want code 1 without client", code, called)
+		}
+		if !strings.Contains(stderr.String(), "control token is required") {
+			t.Fatalf("stderr = %q, want required token error", stderr.String())
+		}
+	})
+}
+
+func TestRunHasNoControlTokenFlag(t *testing.T) {
+	tests := []struct {
+		name        string
+		run         func(*bytes.Buffer) int
+		wantCode    int
+		wantMessage string
+	}{
+		{
+			name:        "http",
+			wantCode:    2,
+			wantMessage: "flag provided but not defined: -token",
+			run: func(stderr *bytes.Buffer) int {
+				return runHTTPCommand(
+					[]string{"ratatosk", "--token", testControlToken},
+					func(string) string { return "" },
+					io.Discard,
+					stderr,
+					func(string, int, string) error { return nil },
+				)
+			},
+		},
+		{
+			name:        "tcp",
+			wantCode:    1,
+			wantMessage: "Usage:",
+			run: func(stderr *bytes.Buffer) int {
+				return runTCPCommand(
+					[]string{"22", "--token", testControlToken},
+					func(string) string { return "" },
+					io.Discard,
+					stderr,
+					func(string, int, string) error { return nil },
+				)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			if code := tt.run(&stderr); code != tt.wantCode {
+				t.Fatalf("code = %d, want %d", code, tt.wantCode)
+			}
+			if !strings.Contains(stderr.String(), tt.wantMessage) {
+				t.Fatalf("stderr = %q, want %q", stderr.String(), tt.wantMessage)
+			}
+		})
 	}
 }
 
 func TestRunTCPCommandAcceptsServerFlagAfterPort(t *testing.T) {
 	oldLogger := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+	oldOptions := cliControlOptions
+	t.Cleanup(func() {
+		slog.SetDefault(oldLogger)
+		cliControlOptions = oldOptions
+	})
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -511,7 +931,12 @@ func TestRunTCPCommandAcceptsServerFlagAfterPort(t *testing.T) {
 
 	code := run(
 		[]string{"ratatosk", "tcp", "8080", "--server", "manual.example:1234"},
-		func(string) string { return "" },
+		func(key string) string {
+			if key == "RATATOSK_CONTROL_TOKEN" {
+				return testControlToken
+			}
+			return ""
+		},
 		&stdout,
 		&stderr,
 		func(string) error {
@@ -541,6 +966,92 @@ func TestRunTCPCommandAcceptsServerFlagAfterPort(t *testing.T) {
 	}
 	if gotProto != protocol.ProtoTCP {
 		t.Fatalf("proto = %q, want %q", gotProto, protocol.ProtoTCP)
+	}
+}
+
+func TestRunTCPCommandAcceptsEqualsControlFlagsAfterPort(t *testing.T) {
+	oldLogger := slog.Default()
+	oldOptions := cliControlOptions
+	t.Cleanup(func() {
+		slog.SetDefault(oldLogger)
+		cliControlOptions = oldOptions
+	})
+
+	called := false
+	code := runTCPCommand(
+		[]string{"8080", "--server=relay.example:7000", "--tls=true", "--ca=/tmp/ca.pem", "--server-name=relay.example"},
+		func(key string) string {
+			if key == "RATATOSK_CONTROL_TOKEN" {
+				return testControlToken
+			}
+			return ""
+		},
+		io.Discard,
+		io.Discard,
+		func(server string, port int, proto string) error {
+			called = true
+			if server != "relay.example:7000" || port != 8080 || proto != protocol.ProtoTCP {
+				t.Fatalf("client arguments = (%q, %d, %q)", server, port, proto)
+			}
+			return nil
+		},
+	)
+	if code != 0 || !called {
+		t.Fatalf("code = %d, client called = %v, want successful client call", code, called)
+	}
+	if !cliControlOptions.TLS || cliControlOptions.CAFile != "/tmp/ca.pem" || cliControlOptions.ServerName != "relay.example" {
+		t.Fatalf("control options = %+v", cliControlOptions)
+	}
+}
+
+func TestRunTCPCommandRejectsPlaintextControlToken(t *testing.T) {
+	oldLogger := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	var stderr bytes.Buffer
+	called := false
+	code := runTCPCommand(
+		[]string{"22"},
+		func(key string) string {
+			if key == "RATATOSK_CONTROL_TOKEN" {
+				return testControlToken
+			}
+			return ""
+		},
+		io.Discard,
+		&stderr,
+		func(string, int, string) error {
+			called = true
+			return nil
+		},
+	)
+	if code != 1 || called {
+		t.Fatalf("code = %d, client called = %v, want code 1 without client", code, called)
+	}
+	if !strings.Contains(stderr.String(), "control tokens require TLS") {
+		t.Fatalf("stderr = %q, want TLS requirement", stderr.String())
+	}
+}
+
+func TestIsLoopbackRelay(t *testing.T) {
+	tests := []struct {
+		address string
+		want    bool
+	}{
+		{address: "not-a-host-port", want: false},
+		{address: "localhost:7000", want: true},
+		{address: "LOCALHOST:7000", want: true},
+		{address: "127.0.0.1:7000", want: true},
+		{address: "[::1]:7000", want: true},
+		{address: "relay.example:7000", want: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.address, func(t *testing.T) {
+			if got := isLoopbackRelay(tt.address); got != tt.want {
+				t.Fatalf("isLoopbackRelay(%q) = %v, want %v", tt.address, got, tt.want)
+			}
+		})
 	}
 }
 
@@ -1211,7 +1722,11 @@ func TestRunTCPCommandFlagParseError(t *testing.T) {
 
 func TestRunTCPCommandEnvOverride(t *testing.T) {
 	oldLogger := slog.Default()
-	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+	oldOptions := cliControlOptions
+	t.Cleanup(func() {
+		slog.SetDefault(oldLogger)
+		cliControlOptions = oldOptions
+	})
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -1220,8 +1735,11 @@ func TestRunTCPCommandEnvOverride(t *testing.T) {
 	code := run(
 		[]string{"ratatosk", "tcp", "22"},
 		func(key string) string {
-			if key == "RATATOSK_SERVER" {
+			switch key {
+			case "RATATOSK_SERVER":
 				return "relay.example:7000"
+			case "RATATOSK_CONTROL_TOKEN":
+				return testControlToken
 			}
 			return ""
 		},

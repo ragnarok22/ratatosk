@@ -70,7 +70,7 @@ Run `make help` to list all targets. Here's the full reference:
 |--------|-------------|
 | `make test` | Run all Go tests |
 | `make test-race` | Run tests with the race detector |
-| `make coverage` | Generate and display a coverage report |
+| `make coverage` | Generate coverage and enforce the 85% project threshold |
 | `make format` | Format Go source files with `gofmt` |
 | `make format-check` | Verify Go files are formatted (CI check) |
 | `make lint` | Run `go vet` |
